@@ -1,0 +1,27 @@
+# Runtime logs
+*.log
+bot.log
+
+# Local state and sensitive user data
+punch_data.json
+punched_today.json
+schedule_today.json
+synced.flag
+
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+
+# Windows service binary / local tools
+nssm.exe
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Editor and OS files
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
