@@ -2567,8 +2567,41 @@ async def admin_query(interaction: discord.Interaction):
         return
     lines = []
     today = date.today()
+    yesterday = today - timedelta(days=1)
     today_str = today.strftime("%Y-%m-%d")
     month_str = today.strftime("%Y-%m")
+    now_hm = datetime.now().strftime("%H:%M")
+    punched_now = load_punched_today()
+    saved_schedules = load_schedule_today()
+    weekday_names = ["一", "二", "三", "四", "五", "六", "日"]
+
+    def fmt_dates(date_list):
+        parts = []
+        for ds in date_list:
+            try:
+                dt = date.fromisoformat(ds)
+                wd = weekday_names[dt.weekday()]
+                parts.append(f"{dt.month}/{dt.day}（{wd}）")
+            except:
+                parts.append(ds)
+        return "、".join(parts) if parts else "無"
+
+    def scheduled(uid, kind):
+        user_schedule = saved_schedules.get(uid) or scheduled_times.get(uid, {})
+        return user_schedule.get(kind, "")
+
+    def punched_time(uid, kind):
+        return punched_now.get(f"{uid}-{kind}-{today_str}")
+
+    def done_or_wait(uid, kind, label, schedule_time):
+        punched_at = punched_time(uid, kind)
+        if punched_at is not None:
+            return f"✅ {label}：{punched_at or schedule_time or '已打卡'}"
+        if schedule_time:
+            if schedule_time <= now_hm:
+                return f"⚠️ {label}：預計 {schedule_time}，尚無成功紀錄"
+            return f"⏳ {label}：等待中（預計 {schedule_time}）"
+        return f"⏳ {label}：尚未成功"
 
     for uid, ud in data.items():
         empid = ud.get("empid")
@@ -2581,42 +2614,227 @@ async def admin_query(interaction: discord.Interaction):
 
         # 本月值班
         month_duties = [d for d in all_duties if d.startswith(month_str)]
-        # 未來值班（今天之後，含今天）
-        future_duties = [d for d in all_duties if d >= today_str]
         # 本月休假
         month_leaves = [d for d in all_leaves if d.startswith(month_str)]
-        # 未來休假
-        future_leaves = [d for d in all_leaves if d >= today_str]
+        duty_detail = fmt_dates(month_duties)
+        leave_detail = fmt_dates(month_leaves)
 
-        weekday_names = ["一", "二", "三", "四", "五", "六", "日"]
+        is_duty_today = is_duty_day(ud, today)
+        is_duty_after = is_duty_day(ud, yesterday)
+        is_leave_today = is_leave_day(ud, today)
+        is_weekend_today = is_weekend(today)
+        is_cancelled_today = is_auto_cancelled(ud, today)
 
-        def fmt_dates(date_list):
-            parts = []
-            for ds in date_list:
-                try:
-                    dt = date.fromisoformat(ds)
-                    wd = weekday_names[dt.weekday()]
-                    parts.append(f"{dt.month}/{dt.day}（{wd}）")
-                except:
-                    parts.append(ds)
-            return "、".join(parts) if parts else "無"
+        scheduled_in = scheduled(uid, "in")
+        scheduled_out = scheduled(uid, "out")
+        scheduled_duty = scheduled(uid, "dutyout")
 
-        duty_detail = fmt_dates(future_duties)
-        leave_detail = fmt_dates(future_leaves)
+        today_lines = []
+        if not ud.get("auto_punch", True):
+            mode = "❌ 自動打卡關閉"
+            today_lines.append("　今日打卡：不會自動執行")
+        elif is_cancelled_today:
+            mode = "⏸️ 今日已取消自動打卡"
+            today_lines.append("　今日打卡：手動模式")
+        elif is_duty_after:
+            mode = "🌙 昨日值班後"
+            today_lines.append("　上班：⏭️ 值班隔天不打上班卡")
+            today_lines.append("　" + done_or_wait(uid, "dutyout", "值班下班", scheduled_duty))
+        elif is_leave_today:
+            mode = "🏖️ 今日休假"
+            today_lines.append("　上班：⏭️ 休假不打卡")
+            today_lines.append("　下班：⏭️ 休假不打卡")
+        elif is_weekend_today and not is_duty_today:
+            mode = "📴 週末"
+            today_lines.append("　上班：⏭️ 週末不打卡")
+            today_lines.append("　下班：⏭️ 週末不打卡")
+        elif is_duty_today:
+            mode = "🌙 今日值班"
+            today_lines.append("　" + done_or_wait(uid, "in", "上班", scheduled_in))
+            today_lines.append("　下班：⏭️ 今日值班不打下班卡")
+            today_lines.append(f"　值班下班：明天 {scheduled_duty or '08:05~08:40'}")
+        else:
+            mode = "🟢 平日"
+            today_lines.append("　" + done_or_wait(uid, "in", "上班", scheduled_in))
+            today_lines.append("　" + done_or_wait(uid, "out", "下班", scheduled_out))
 
         lines.append(
             f"👤 <@{uid}>　員工編號：{empid}　自動打卡：{auto}\n"
-            f"　**本月值班**：{len(month_duties)} 天　**本月休假**：{len(month_leaves)} 天\n"
-            f"　**未來值班**（{len(future_duties)} 天）：{duty_detail}\n"
-            f"　**未來休假**（{len(future_leaves)} 天）：{leave_detail}"
+            f"　今日模式：{mode}\n"
+            + "\n".join(today_lines) + "\n"
+            f"　**本月值班**（{len(month_duties)} 天）：{duty_detail}\n"
+            f"　**本月休假**（{len(month_leaves)} 天）：{leave_detail}"
         )
     embed = discord.Embed(
-        title=f"📋 所有綁定使用者（共 {len(lines)} 人）",
+        title=f"📋 所有綁定使用者（共 {len(lines)} 人）｜{today_str}",
         description="\n\n".join(lines) if lines else "無綁定使用者",
         color=0x5865F2
     )
     embed.set_footer(text=f"查詢時間：{datetime.now().strftime('%H:%M')}")
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@tree.command(name="管理今日打卡驗證", description="管理員查詢所有綁定使用者今日 e-HR 實際刷卡紀錄")
+@app_commands.default_permissions(administrator=True)
+async def admin_verify_today(interaction: discord.Interaction):
+    if interaction.user.id not in ADMIN_IDS:
+        embed = discord.Embed(title="❌ 權限不足", description="此指令僅限管理員使用", color=0xff0000)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True, thinking=True)
+
+    data = load_data()
+    bound_users = [(uid, ud) for uid, ud in data.items() if ud.get("empid")]
+    if not bound_users:
+        embed = discord.Embed(title="📋 今日 e-HR 打卡驗證", description="目前無任何綁定使用者", color=0xffaa00)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        return
+
+    today = date.today()
+    yesterday = today - timedelta(days=1)
+    today_str = today.strftime("%Y-%m-%d")
+
+    def ehr_query_one(empid, password):
+        if not password:
+            return {"success": False, "message": "未儲存密碼，無法登入 e-HR"}
+        try:
+            sess = requests.Session()
+            sess.get(f"{PUNCH_URL}?file={FILE_PARAM}", timeout=10, verify=False)
+            login_resp = sess.post(
+                PUNCH_URL,
+                data={
+                    "file": FILE_PARAM,
+                    "uid": empid,
+                    "pwd": password,
+                    "image.x": "0",
+                    "image.y": "0",
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                timeout=15,
+                verify=False
+            )
+            if "hrlogin" in login_resp.text:
+                return {"success": False, "message": "登入失敗，請確認帳密"}
+            return query_today_punch(sess, empid)
+        except Exception as e:
+            return {"success": False, "message": f"查詢失敗：{str(e)}"}
+
+    def verify_all_users():
+        results = {}
+        for uid, ud in bound_users:
+            results[uid] = ehr_query_one(ud.get("empid"), ud.get("password"))
+        return results
+
+    loop = asyncio.get_event_loop()
+    ehr_results = await loop.run_in_executor(None, verify_all_users)
+
+    def source_text(source):
+        if source == "ehr":
+            return "e-HR 判定"
+        if source == "times":
+            return "e-HR 原始刷卡"
+        return "e-HR"
+
+    def actual_line(label, actual_t, source):
+        if actual_t:
+            return f"✅ {label}：{actual_t}（{source_text(source)}）"
+        return f"⚠️ {label}：e-HR 尚無紀錄"
+
+    lines = []
+    for uid, ud in bound_users:
+        empid = ud.get("empid")
+        result = ehr_results.get(uid, {"success": False, "message": "查詢失敗"})
+        is_duty_today = is_duty_day(ud, today)
+        is_duty_after = is_duty_day(ud, yesterday)
+        is_leave_today = is_leave_day(ud, today)
+        is_weekend_today = is_weekend(today)
+        is_cancelled_today = is_auto_cancelled(ud, today)
+
+        if not ud.get("auto_punch", True):
+            mode = "❌ 自動打卡關閉"
+        elif is_cancelled_today:
+            mode = "⏸️ 今日已取消自動打卡"
+        elif is_duty_after:
+            mode = "🌙 昨日值班後"
+        elif is_leave_today:
+            mode = "🏖️ 今日休假"
+        elif is_weekend_today and not is_duty_today:
+            mode = "📴 週末"
+        elif is_duty_today:
+            mode = "🌙 今日值班"
+        else:
+            mode = "🟢 平日"
+        no_auto_expected = (
+            not ud.get("auto_punch", True)
+            or is_cancelled_today
+            or is_leave_today
+            or (is_weekend_today and not is_duty_today)
+        )
+
+        detail_lines = [f"👤 <@{uid}>　員工編號：{empid}", f"　今日模式：{mode}"]
+        if result.get("success"):
+            inferred = infer_punch_times(result, is_duty_after)
+            times = result.get("times", [])
+            raw_times = "、".join(times) if times else "無"
+
+            if is_duty_after:
+                detail_lines.append("　上班：⏭️ 值班隔天不打上班卡")
+                detail_lines.append(
+                    "　" + actual_line("值班下班", inferred.get("inferred_out"), inferred.get("out_source"))
+                )
+            elif is_leave_today:
+                detail_lines.append("　上班：⏭️ 休假不打卡")
+                detail_lines.append("　下班：⏭️ 休假不打卡")
+            elif is_weekend_today and not is_duty_today:
+                detail_lines.append("　上班：⏭️ 週末不打卡")
+                detail_lines.append("　下班：⏭️ 週末不打卡")
+            elif is_duty_today:
+                detail_lines.append(
+                    "　" + actual_line("上班", inferred.get("inferred_in"), inferred.get("in_source"))
+                )
+                detail_lines.append("　下班：⏭️ 今日值班不打下班卡")
+                detail_lines.append("　值班下班：明天才驗證")
+            else:
+                detail_lines.append(
+                    "　" + actual_line("上班", inferred.get("inferred_in"), inferred.get("in_source"))
+                )
+                detail_lines.append(
+                    "　" + actual_line("下班", inferred.get("inferred_out"), inferred.get("out_source"))
+                )
+
+            detail_lines.append(f"　e-HR 原始刷卡：{raw_times}")
+        else:
+            message = result.get("message", "今日尚無刷卡記錄")
+            if no_auto_expected and "今日尚無刷卡記錄" in message:
+                detail_lines.append("　✅ e-HR 今日無刷卡紀錄（符合今日模式）")
+            else:
+                detail_lines.append(f"　⚠️ e-HR 查詢結果：{message}")
+
+        lines.append("\n".join(detail_lines))
+
+    embeds = []
+    current = []
+    current_len = 0
+    for block in lines:
+        block_len = len(block) + 2
+        if current and current_len + block_len > 3800:
+            embeds.append("\n\n".join(current))
+            current = []
+            current_len = 0
+        current.append(block)
+        current_len += block_len
+    if current:
+        embeds.append("\n\n".join(current))
+
+    for idx, desc in enumerate(embeds, start=1):
+        suffix = f"（{idx}/{len(embeds)}）" if len(embeds) > 1 else ""
+        embed = discord.Embed(
+            title=f"📋 今日 e-HR 打卡驗證｜{today_str}{suffix}",
+            description=desc,
+            color=0x5865F2
+        )
+        embed.set_footer(text=f"查詢時間：{datetime.now().strftime('%H:%M')} · 來源：e-HR 即時查詢")
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 # ── 通知設定 ──
 notify_type_choices = [
@@ -2920,19 +3138,17 @@ async def monthly_status(interaction: discord.Interaction):
 
     await interaction.response.send_message(embeds=[embed1, embed2], ephemeral=True)
 
-
-SYNC_FLAG_FILE = "synced.flag"
 _auto_punch_started = False  # 確保 auto_punch_task 只啟動一次
+_commands_synced = False  # 每次程式啟動同步一次 slash command
 
 @client.event
 async def on_ready():
-    global _auto_punch_started
-    # 指令同步（只做一次）
-    if not os.path.exists(SYNC_FLAG_FILE):
+    global _auto_punch_started, _commands_synced
+    # 每次程式啟動同步一次，確保新增/修改的 slash command 會出現在 Discord。
+    if not _commands_synced:
         try:
             await tree.sync()
-            with open(SYNC_FLAG_FILE, "w") as f:
-                f.write("synced")
+            _commands_synced = True
             print("✅ 指令同步完成")
         except Exception as e:
             print(f"⚠️ 指令同步失敗：{e}")

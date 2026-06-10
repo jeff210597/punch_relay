@@ -15,7 +15,7 @@
 - 今日隨機排程：`schedule_today.json`
 - 執行紀錄：`bot.log`
 - Windows 服務工具：`nssm.exe`
-- Discord 指令同步旗標：`synced.flag`
+- Discord 指令同步：程式啟動時會同步一次 slash commands
 
 此專案目前是單檔式 Python Discord bot，使用 `discord.py`、`requests`、`asyncio`、`json`，並透過 e-HR servlet endpoint 進行登入、打卡與查詢。
 
@@ -81,8 +81,8 @@
    - 補打按鈕與 modal 的錯誤訊息要保持清楚，避免使用者誤以為已成功。
 
 6. 修改指令後注意同步。
-   - 新增、刪除或改名 slash command 後，需要刪除 `synced.flag` 或依 `start.bat` 選擇重新同步。
-   - 沒有改指令時，不要不必要地強制 sync。
+   - 程式啟動時會同步一次 slash commands，新增、刪除或改名指令後需重啟服務讓同步生效。
+   - 重連後的 `on_ready` 不會重複同步。
 
 ## 編碼與文字注意事項
 
@@ -120,10 +120,23 @@ python -m py_compile bot_all_in_one.py
 ```
 
 4. 若本機 Python 不在 PATH，改使用已知安裝路徑，或明確告知無法做語法檢查。
-5. 若沒有新增、刪除或改名 slash command，重啟時採一般重啟，不重新同步 Discord 指令。
-6. 若有新增、刪除或改名 slash command，重啟時需要刪除 `synced.flag` 或使用 `start.bat` 的重新同步流程。
+5. 修改完成後重啟服務，讓程式載入新版本；若有新增、刪除或改名 slash command，重啟後確認 log 出現指令同步成功。
+6. 不再依賴 `synced.flag` 控制同步，不要要求使用者手動刪除該檔案。
 7. 重啟 `PunchBotService` 需要系統管理員權限。Codex 若要執行重啟命令，必須向使用者請求授權。
 8. 重啟後查看 `bot.log` 最新內容，確認 bot 啟動成功、沒有語法錯誤、`auto_punch_task` 已啟動。
+
+## 完成修改後的 GitHub 同步流程
+
+每次完成修改與驗證後，請依序執行：
+
+```powershell
+git status
+git add .
+git commit -m "update project"
+git push origin main
+```
+
+若 `git push origin main` 失敗，先停止後續操作，不要自行改分支、rebase、reset 或 force push；請回報錯誤原因並等待使用者確認。
 
 一般重啟優先使用現有 `start.bat`，但它會要求互動選擇 `Y/N`。如果要完全自動化，需另外建立非互動重啟腳本，並分成「一般重啟」與「重新同步指令重啟」兩種，避免每次都誤 sync。
 
@@ -146,7 +159,6 @@ python -m py_compile bot_all_in_one.py
 
 - 停止 `PunchBotService`
 - 終止既有 `python.exe`
-- 視 `synced.flag` 決定是否重新同步 Discord 指令
 - 啟動 `PunchBotService`
 
 修改程式後若要重啟，請注意這會影響正在等待的自動打卡流程。重啟前先確認是否接近打卡時間。
