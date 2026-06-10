@@ -107,6 +107,26 @@ python -m py_compile bot_all_in_one.py
 6. 若有改 JSON 處理，確認 `punch_data.json`、`schedule_today.json`、`punched_today.json` 都能被讀取。
 7. 若有改 Discord 指令，重啟服務並確認是否需要重新同步 slash commands。
 
+## Codex 後續修改與重啟流程
+
+使用者希望後續都在 Codex 內修改 `C:\punch_relay\bot_all_in_one.py`，並在修改完成後協助重啟 bot。後續代理請依以下流程處理：
+
+1. 修改前先確認目前是否接近打卡時間。若接近上班、下班或值班下班時間，先提醒使用者重啟可能影響排程。
+2. 修改 `bot_all_in_one.py` 時，優先小範圍 patch，不做無關重構。
+3. 修改完成後，若環境有可用 Python，先執行：
+
+```powershell
+python -m py_compile bot_all_in_one.py
+```
+
+4. 若本機 Python 不在 PATH，改使用已知安裝路徑，或明確告知無法做語法檢查。
+5. 若沒有新增、刪除或改名 slash command，重啟時採一般重啟，不重新同步 Discord 指令。
+6. 若有新增、刪除或改名 slash command，重啟時需要刪除 `synced.flag` 或使用 `start.bat` 的重新同步流程。
+7. 重啟 `PunchBotService` 需要系統管理員權限。Codex 若要執行重啟命令，必須向使用者請求授權。
+8. 重啟後查看 `bot.log` 最新內容，確認 bot 啟動成功、沒有語法錯誤、`auto_punch_task` 已啟動。
+
+一般重啟優先使用現有 `start.bat`，但它會要求互動選擇 `Y/N`。如果要完全自動化，需另外建立非互動重啟腳本，並分成「一般重啟」與「重新同步指令重啟」兩種，避免每次都誤 sync。
+
 ## 常見檢查點
 
 - 今天是否為週末。

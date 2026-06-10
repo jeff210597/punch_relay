@@ -25,3 +25,6 @@ __pycache__/
 .idea/
 Thumbs.db
 Desktop.ini
+
+# Codex uploaded screenshots / attachments
+.codex-remote-attachments/

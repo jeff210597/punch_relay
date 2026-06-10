@@ -49,13 +49,13 @@ git status
 - `.gitignore`
 - `.env.example`
 - `README.md`
-- `agent.md`
+- `docs/codex/agent.md`
 - `bot_all_in_one.py`
-- `git_diff.md`
+- `docs/github/git_diff.md`
 - `requirements.txt`
 - `start.bat`
-- `vscode_tunnel_mobile_guide.md`
-- `github_upload_guide.md`
+- `docs/codex/vscode_tunnel_mobile_guide.md`
+- `docs/github/github_upload_guide.md`
 
 不應該看到：
 

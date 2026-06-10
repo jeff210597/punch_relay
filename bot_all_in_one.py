@@ -29,6 +29,26 @@ from datetime import datetime, date, timedelta
 
 urllib3.disable_warnings()
 
+def load_local_env():
+    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if not os.path.exists(env_path):
+        return
+    try:
+        with open(env_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.lstrip("\ufeff").strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.lstrip("\ufeff").strip()
+                value = value.strip().strip('"').strip("'")
+                if key:
+                    os.environ[key] = value
+    except Exception as e:
+        print(f"⚠️ .env 載入失敗：{e}")
+
+load_local_env()
+
 # =====================
 # 設定區（只需要改這裡）
 # =====================
@@ -40,6 +60,25 @@ PUNCH_URL = f"{EHR_BASE}/servlet/jform"
 FILE_PARAM = "hrm6p_edu.pkg,hrm6p.pkg,hrm6p_out_M1.pkg,hrm6fw_edu.pkg,hrm6bw.pkg,hrm6aw_edu.pkg,hrm6jw_edu.pkg,hrm6p_out_M21.pkg"
 
 DATA_FILE = "punch_data.json"
+
+def validate_required_config():
+    missing = []
+    if not DISCORD_TOKEN:
+        missing.append("DISCORD_TOKEN")
+    if not EHR_BASE:
+        missing.append("EHR_BASE")
+    if NOTIFY_CHANNEL_ID <= 0:
+        missing.append("NOTIFY_CHANNEL_ID")
+    if missing:
+        msg = (
+            "❌ Bot 啟動設定不完整，已停止啟動。\n"
+            f"缺少或無效設定：{', '.join(missing)}\n"
+            "請確認 C:\\punch_relay\\.env 內已設定 DISCORD_TOKEN、NOTIFY_CHANNEL_ID、EHR_BASE。"
+        )
+        print(msg)
+        raise SystemExit(1)
+
+validate_required_config()
 
 # =====================
 # 隨機打卡時間設定
@@ -106,6 +145,32 @@ def save_user_data(user_id, user_data):
     data = load_data()
     data[str(user_id)] = user_data
     save_data(data)
+
+def validate_ehr_login(empid, password):
+    """只驗證 e-HR 帳密，不執行打卡。"""
+    if not EHR_BASE:
+        return {"success": False, "message": "e-HR 網址尚未設定，請確認 EHR_BASE 環境變數"}
+    session = requests.Session()
+    try:
+        session.get(f"{PUNCH_URL}?file={FILE_PARAM}", timeout=10, verify=False)
+        login_resp = session.post(
+            PUNCH_URL,
+            data={
+                "file": FILE_PARAM,
+                "uid": empid,
+                "pwd": password,
+                "image.x": "0",
+                "image.y": "0",
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=15,
+            verify=False
+        )
+        if "hrlogin" in login_resp.text:
+            return {"success": False, "message": "登入失敗，請確認員工編號或密碼"}
+        return {"success": True}
+    except Exception as e:
+        return {"success": False, "message": f"登入驗證連線失敗：{str(e)}"}
 
 # =====================
 # 加密邏輯
@@ -608,86 +673,14 @@ async def auto_punch_task(client):
     last_date = date.today().strftime("%Y-%m-%d")
     print(f"📋 載入今日已打卡記錄：{len(punched_today)} 筆")
 
-    # ── 啟動時補打：檢查今天時間已過但未打的下班卡 ──
-    # 注意：上班卡絕對不補打（補打會造成遲到記錄）
+    # 等 Bot 完全就緒。逾時未打的下班/值班下班卡交給主迴圈補跑；
+    # 若在這裡先發補打按鈕，主迴圈仍會自動打卡，會造成「按鈕未按就成功」的重複通知。
     await asyncio.sleep(5)  # 等 Bot 完全就緒
-    startup_today = date.today()
-    startup_yesterday = startup_today - timedelta(days=1)
-    startup_now = datetime.now().strftime("%H:%M")
-    startup_data = load_data()
-    for uid_s, ud_s in startup_data.items():
-        empid_s = ud_s.get("empid")
-        password_s = ud_s.get("password")
-        if not empid_s or not password_s or not ud_s.get("auto_punch", True):
-            continue
-        if is_auto_cancelled(ud_s, startup_today):
-            continue
-        times_s = scheduled_times.get(uid_s, {})
-
-        # 值班下班卡補打：值班隔天，時間已過且未打
-        duty_t = times_s.get("dutyout", "")
-        if is_duty_day(ud_s, startup_yesterday) and duty_t:
-            key_duty = f"{uid_s}-dutyout-{startup_today.strftime('%Y-%m-%d')}"
-            if key_duty not in punched_today and startup_now > duty_t:
-                print(f"🔔 請求補打值班下班卡：{uid_s}（原定 {duty_t}，現在 {startup_now}）")
-                try:
-                    user_s = client.get_user(int(uid_s)) or await client.fetch_user(int(uid_s))
-                    view_s = MakeupPunchView(
-                        client_ref=client,
-                        uid=uid_s,
-                        empid=empid_s,
-                        password=password_s,
-                        action="out",
-                        label="值班下班",
-                        punch_key=key_duty,
-                        punched_today_ref=punched_today,
-                        today_str=startup_today.strftime("%Y-%m-%d"),
-                    )
-                    await user_s.send(
-                        f"🤖 **補打確認**\n"
-                        f"⚠️ 值班下班卡（原定 {duty_t}）因重啟延誤尚未打卡。\n"
-                        f"現在時間：{startup_now}\n\n"
-                        f"請確認是否要補打？",
-                        view=view_s
-                    )
-                except Exception as e:
-                    print(f"補打確認通知失敗：{e}")
-
-        # 平日下班卡補打：非值班、非休假、非週末，時間已過且未打
-        out_t = times_s.get("out", "")
-        if (out_t and startup_now > out_t
-                and not is_duty_day(ud_s, startup_today)
-                and not is_leave_day(ud_s, startup_today)
-                and not is_weekend(startup_today)):
-            key_out = f"{uid_s}-out-{startup_today.strftime('%Y-%m-%d')}"
-            if key_out not in punched_today:
-                print(f"🔔 請求補打下班卡：{uid_s}（原定 {out_t}，現在 {startup_now}）")
-                try:
-                    user_s3 = client.get_user(int(uid_s)) or await client.fetch_user(int(uid_s))
-                    view_s3 = MakeupPunchView(
-                        client_ref=client,
-                        uid=uid_s,
-                        empid=empid_s,
-                        password=password_s,
-                        action="out",
-                        label="下班",
-                        punch_key=key_out,
-                        punched_today_ref=punched_today,
-                        today_str=startup_today.strftime("%Y-%m-%d"),
-                    )
-                    await user_s3.send(
-                        f"🤖 **補打確認**\n"
-                        f"⚠️ 下班卡（原定 {out_t}）因重啟延誤尚未打卡。\n"
-                        f"現在時間：{startup_now}\n\n"
-                        f"請確認是否要補打？",
-                        view=view_s3
-                    )
-                except Exception as e:
-                    print(f"補打確認通知失敗：{e}")
 
     while not client.is_closed():
         now = datetime.now()
         current_time = now.strftime("%H:%M")
+        current_min = now.hour * 60 + now.minute
         today = date.today()
         yesterday = today - timedelta(days=1)
         today_str = today.strftime("%Y-%m-%d")
@@ -729,9 +722,35 @@ async def auto_punch_task(client):
             times = scheduled_times[uid]
             action = None
             label = ""
+            in_due = 0 <= _t2m(times["in"]) <= current_min
+            out_due = 0 <= _t2m(times["out"]) <= current_min
+            dutyout_due = 0 <= _t2m(times["dutyout"]) <= current_min
+
+            # 已到期的下班卡要優先於上班卡判斷。
+            # 若早上本地記錄缺漏，使用 elif 會讓「上班已過期」一直擋住下午下班卡。
+            # 值班下班卡（昨天是值班日就打，請假日也要打）
+            if dutyout_due:
+                if is_duty_day(user_data, yesterday):
+                    if not is_auto_cancelled(user_data, today):  # 取消自動打卡才跳過
+                        key = f"{uid}-dutyout-{today_str}"
+                        if key not in punched_today:
+                            action = "out"
+                            label = "值班下班"
+
+            # 下班卡（請假日或取消自動打卡則跳過，平日非值班，且今天沒打過值班下班卡）
+            if action is None and out_due:
+                if is_auto_cancelled(user_data, today) or is_leave_day(user_data, today):
+                    pass  # 請假或取消自動打卡不打下班卡
+                elif not is_weekend(today) and not is_duty_day(user_data, today) and not is_duty_day(user_data, yesterday):
+                    dutyout_key = f"{uid}-dutyout-{today_str}"
+                    if dutyout_key not in punched_today:
+                        key = f"{uid}-out-{today_str}"
+                        if key not in punched_today:
+                            action = "out"
+                            label = "下班"
 
             # 上班卡（請假日或取消自動打卡則跳過，值班隔天也跳過）
-            if current_time == times["in"]:
+            if action is None and in_due and current_min < 8 * 60:
                 if is_auto_cancelled(user_data, today) or is_leave_day(user_data, today):
                     pass  # 休假或取消自動打卡不打上班卡
                 elif is_weekend(today) and not is_duty_day(user_data, today):
@@ -743,27 +762,6 @@ async def auto_punch_task(client):
                     if key not in punched_today:
                         action = "in"
                         label = "上班"
-
-            # 下班卡（請假日或取消自動打卡則跳過，平日非值班，且今天沒打過值班下班卡）
-            elif current_time == times["out"]:
-                if is_auto_cancelled(user_data, today) or is_leave_day(user_data, today):
-                    pass  # 請假或取消自動打卡不打下班卡
-                elif not is_weekend(today) and not is_duty_day(user_data, today):
-                    dutyout_key = f"{uid}-dutyout-{today_str}"
-                    if dutyout_key not in punched_today:
-                        key = f"{uid}-out-{today_str}"
-                        if key not in punched_today:
-                            action = "out"
-                            label = "下班"
-
-            # 值班下班卡（昨天是值班日就打，請假日也要打）
-            elif current_time == times["dutyout"]:
-                if is_duty_day(user_data, yesterday):
-                    if not is_auto_cancelled(user_data, today):  # 取消自動打卡才跳過
-                        key = f"{uid}-dutyout-{today_str}"
-                        if key not in punched_today:
-                            action = "out"
-                            label = "值班下班"
 
             if action:
                 # 打卡前重新從檔案讀取（防止多個Bot實例重複打卡）
@@ -779,7 +777,9 @@ async def auto_punch_task(client):
                 # 注意：不在此處寫入 punched_today，等打卡成功後才寫入
 
             if action:
-                result = punch_clock(empid, password, action)
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None, lambda ep=empid, pw=password, ac=action: punch_clock(ep, pw, ac)
+                )
                 try:
                     user = client.get_user(int(uid)) or await client.fetch_user(int(uid))
                 except:
@@ -800,21 +800,26 @@ async def auto_punch_task(client):
                         else:
                             # 上班卡失敗不發補打按鈕（八點後補打會變遲到）
                             rk = None
+                            retry_at = datetime.now() + timedelta(minutes=5)
+                            should_retry = action != "in" or retry_at < datetime.combine(today, datetime.min.time()) + timedelta(hours=8)
                             if action != "in":
                                 rk = f"{uid}-dutyout-{today_str}" if label == "值班下班" else f"{uid}-out-{today_str}"
-                            retry_queue.append({
-                                "uid": uid,
-                                "empid": empid,
-                                "password": password,
-                                "action": action,
-                                "label": label,
-                                "retry_at": datetime.now() + timedelta(minutes=5),
-                                "attempts": 1,
-                                "retry_key": rk,
-                            })
-                            fail_msg = f"🤖 自動打卡通知\n❌ {label}打卡失敗：{result.get('message')}\n⏳ 將於 5 分鐘後自動重試"
+                            if should_retry:
+                                retry_queue.append({
+                                    "uid": uid,
+                                    "empid": empid,
+                                    "password": password,
+                                    "action": action,
+                                    "label": label,
+                                    "retry_at": retry_at,
+                                    "attempts": 1,
+                                    "retry_key": rk,
+                                })
+                                fail_msg = f"🤖 自動打卡通知\n❌ {label}打卡失敗：{result.get('message')}\n⏳ 將於 5 分鐘後自動重試"
+                            else:
+                                fail_msg = f"🤖 自動打卡通知\n❌ {label}打卡失敗：{result.get('message')}\n⚠️ 已接近或超過 08:00，為避免遲到記錄，不自動重試上班卡"
                             await user.send(fail_msg)
-                            if action != "in" and rk:
+                            if should_retry and action != "in" and rk:
                                 makeup_view = MakeupPunchView(
                                     client_ref=client,
                                     uid=uid,
@@ -843,7 +848,19 @@ async def auto_punch_task(client):
         still_retrying = []
         for item in list(retry_queue):
             if now_dt >= item["retry_at"]:
-                retry_result = punch_clock(item["empid"], item["password"], item["action"])
+                if item["action"] == "in" and now_dt >= datetime.combine(today, datetime.min.time()) + timedelta(hours=8):
+                    try:
+                        retry_user = client.get_user(int(item["uid"])) or await client.fetch_user(int(item["uid"]))
+                        await retry_user.send(
+                            f"🤖 重試打卡通知\n⚠️ {item['label']}卡已超過 08:00，為避免遲到記錄，不再自動重試\n請自行確認上班打卡狀況"
+                        )
+                    except Exception as e:
+                        print(f"重試通知失敗：{e}")
+                    continue
+
+                retry_result = await asyncio.get_event_loop().run_in_executor(
+                    None, lambda ep=item["empid"], pw=item["password"], ac=item["action"]: punch_clock(ep, pw, ac)
+                )
                 try:
                     retry_user = client.get_user(int(item["uid"])) or await client.fetch_user(int(item["uid"]))
                 except:
@@ -853,14 +870,20 @@ async def auto_punch_task(client):
                     rk = item.get("retry_key")
                     try:
                         if retry_result.get("success"):
+                            rk_to_save = rk or f"{item['uid']}-in-{today_str}"
+                            punched_today[rk_to_save] = datetime.now().strftime("%H:%M")
+                            save_punched_today(punched_today, today_str)
                             retry_msg = f"🤖 重試打卡通知 {attempt_str}\n✅ {item['label']}打卡成功！"
                             if retry_result.get("confirmed") and retry_result.get("times"):
                                 retry_msg += f"\n📋 e-HR 確認：{retry_result['times']}"
                             await retry_user.send(retry_msg)
                         elif item["attempts"] < 3:
                             next_retry = now_dt + timedelta(minutes=5)
-                            still_retrying.append({**item, "retry_at": next_retry, "attempts": item["attempts"]+1})
-                            retry_msg = f"🤖 重試打卡通知 {attempt_str}\n❌ 仍然失敗：{retry_result.get('message')}\n⏳ 將於 5 分鐘後再試"
+                            if item["action"] == "in" and next_retry >= datetime.combine(today, datetime.min.time()) + timedelta(hours=8):
+                                retry_msg = f"🤖 重試打卡通知 {attempt_str}\n❌ 仍然失敗：{retry_result.get('message')}\n⚠️ 下一次重試會超過 08:00，為避免遲到記錄，已停止自動重試上班卡"
+                            else:
+                                still_retrying.append({**item, "retry_at": next_retry, "attempts": item["attempts"]+1})
+                                retry_msg = f"🤖 重試打卡通知 {attempt_str}\n❌ 仍然失敗：{retry_result.get('message')}\n⏳ 將於 5 分鐘後再試"
                             await retry_user.send(retry_msg)
                             # 同步發補打按鈕（下班卡才發）
                             if item["action"] != "in" and rk:
@@ -1410,16 +1433,27 @@ class MakeupPunchView(discord.ui.View):
         for item in self.children:
             item.disabled = True
         await interaction.response.edit_message(content="⏳ 正在補打中...", view=self)
+        latest_punched = load_punched_today()
+        self.punched_today_ref.update(latest_punched)
+        if self.punch_key in self.punched_today_ref:
+            if self.retry_key:
+                retry_queue[:] = [r for r in retry_queue if r.get("retry_key") != self.retry_key]
+            punched_at = self.punched_today_ref.get(self.punch_key) or "稍早"
+            await interaction.edit_original_response(
+                content=f"🤖 **補打通知**\n✅ {self.label}卡已在 {punched_at} 打卡成功，未重複補打。",
+                view=None
+            )
+            return
         result = await asyncio.get_event_loop().run_in_executor(
             None, lambda: punch_clock(self.empid, self.password, self.action)
         )
         punch_time = datetime.now().strftime('%H:%M')
-        self.punched_today_ref[self.punch_key] = punch_time
-        save_punched_today(self.punched_today_ref, self.today_str)
-        # 補打成功後從 retry_queue 移除對應重試項目，避免重複打卡
-        if self.retry_key:
-            retry_queue[:] = [r for r in retry_queue if r.get("retry_key") != self.retry_key]
         if result.get("success"):
+            self.punched_today_ref[self.punch_key] = punch_time
+            save_punched_today(self.punched_today_ref, self.today_str)
+            # 補打成功後從 retry_queue 移除對應重試項目，避免重複打卡
+            if self.retry_key:
+                retry_queue[:] = [r for r in retry_queue if r.get("retry_key") != self.retry_key]
             msg = f"🤖 **補打通知**\n✅ {self.label}卡補打成功！（{punch_time}）"
             if result.get("confirmed") and result.get("times"):
                 msg += f"\n📋 e-HR 確認：{result['times']}"
@@ -1496,7 +1530,7 @@ async def punch_command(interaction: discord.Interaction):
     embed = discord.Embed(title="🏥 e-HR 手動打卡", description="請選擇上班或下班打卡", color=0x5865F2)
     await interaction.response.send_message(embed=embed, view=PunchView(), ephemeral=True)
 
-# ── 綁定帳號（直接儲存，不打卡不驗證）──
+# ── 綁定帳號（先驗證 e-HR 帳密，不執行打卡）──
 async def new_user_punch_assessment(discord_user, uid_str, empid, password, user_data):
     """
     帳號綁定後立即執行補卡評估，確保當天已過的排程不會漏打。
@@ -1670,16 +1704,29 @@ class BindModal(discord.ui.Modal, title='綁定打卡帳號'):
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
-            # 直接儲存，不打卡、不驗證
+            empid = self.empid.value.strip()
+            password = self.password.value.strip()
+            validation = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: validate_ehr_login(empid, password)
+            )
+            if not validation.get("success"):
+                embed = discord.Embed(
+                    title="❌ 綁定失敗",
+                    description=f"{validation.get('message')}\n\n請確認員工編號、密碼與 e-HR 連線後再重新綁定。",
+                    color=0xff0000
+                )
+                await interaction.followup.send(embed=embed, ephemeral=True)
+                return
+
             user_data = get_user_data(interaction.user.id)
-            user_data["empid"] = self.empid.value
-            user_data["password"] = self.password.value
+            user_data["empid"] = empid
+            user_data["password"] = password
             user_data["auto_punch"] = True
             save_user_data(interaction.user.id, user_data)
             embed = discord.Embed(
                 title="✅ 綁定成功",
                 description=(
-                    f"員工編號 **{self.empid.value}** 已綁定！\n\n"
+                    f"員工編號 **{empid}** 已綁定，e-HR 帳密驗證成功！\n\n"
                     "📋 預設設定：\n"
                     "• 模式：平日（週一至週五）\n"
                     "• 自動打卡：開啟\n"
@@ -1696,8 +1743,8 @@ class BindModal(discord.ui.Modal, title='綁定打卡帳號'):
             asyncio.create_task(new_user_punch_assessment(
                 discord_user=interaction.user,
                 uid_str=uid_str,
-                empid=self.empid.value,
-                password=self.password.value,
+                empid=empid,
+                password=password,
                 user_data=user_data,
             ))
         except Exception as e:
