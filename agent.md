@@ -1,130 +1,130 @@
-# Punch Relay Agent Guide
+# Punch Relay 代理維護指南
 
-## Role
+## 角色定位
 
-This file is for agents maintaining this repository. It defines how to change, verify, restart, and publish the punch bot. It does not define punch business rules in detail; use `skill.md` for punch procedure reasoning.
+這個檔案是給維護本 repository 的代理使用，重點是定義如何修改、驗證、重啟與發布打卡機器人。它不負責完整描述打卡業務規則；打卡流程、補打、重試、告警判斷請看 `skill.md`。
 
-Primary duties:
+主要職責：
 
-- Protect Discord tokens, e-HR credentials, employee data, logs, and local state.
-- Keep punch behavior conservative: no duplicate punches, no missed eligible punches, no automatic/makeup `in` punch at or after 08:00.
-- After every code, setting, or documentation change: validate, restart if needed, inspect logs, commit, and push to GitHub.
+- 保護 Discord token、e-HR 帳密、員工資料、log 與本機狀態檔。
+- 維持打卡行為保守：不能重複打卡、不能漏掉符合條件的打卡、不能在 08:00 或之後自動補打上班卡。
+- 每次修改程式、設定範例或文件後，都要驗證；必要時重啟服務、檢查 log、commit，並 push 到 GitHub。
 
-## Project Files
+## 專案檔案
 
-- `bot_all_in_one.py`: main Discord bot.
-- `agent.md`: repository maintenance rules for agents.
-- `skill.md`: punch procedure skill for behavior decisions.
-- `.env.example`: safe environment variable example.
-- `.env`: local secret config, never commit.
-- `punch_data.json`: bound user data, never commit.
-- `punched_today.json`: daily successful punch keys, never commit.
-- `schedule_today.json`: daily random schedule, never commit.
-- `admin_alerts_today.json`: daily admin alert de-duplication, never commit.
-- `bot.log`: runtime log, never commit.
+- `bot_all_in_one.py`：主要 Discord bot 程式。
+- `agent.md`：本 repository 的代理維護規則。
+- `skill.md`：打卡流程與業務判斷規則。
+- `.env.example`：安全的環境變數範例。
+- `.env`：本機秘密設定，禁止提交。
+- `punch_data.json`：綁定使用者資料，禁止提交。
+- `punched_today.json`：當日已成功打卡紀錄，禁止提交。
+- `schedule_today.json`：當日隨機排程時間，禁止提交。
+- `admin_alerts_today.json`：當日管理員告警去重紀錄，禁止提交。
+- `bot.log`：執行 log，禁止提交。
 
-## Current Runtime Settings
+## 目前執行設定
 
-Environment variables:
+環境變數：
 
-- `DISCORD_TOKEN`: required Discord bot token.
-- `NOTIFY_CHANNEL_ID`: required fallback notification channel.
-- `ADMIN_ALERT_CHANNEL_ID`: admin alert channel, currently `1514929880448630904` (`admin-alert`).
-- `EHR_BASE`: required e-HR base URL.
+- `DISCORD_TOKEN`：必填，Discord bot token。
+- `NOTIFY_CHANNEL_ID`：必填，備用通知頻道。
+- `ADMIN_ALERT_CHANNEL_ID`：管理員異常告警頻道，目前是 `1514929880448630904` (`admin-alert`)。
+- `EHR_BASE`：必填，e-HR 基礎網址。
 
-Punch windows:
+打卡時段：
 
-- `in`: 07:00-07:40
-- normal `out`: 17:05-17:40
-- `dutyout`: 08:05-08:40 on the day after duty
+- 上班 `in`：07:00-07:40
+- 一般下班 `out`：17:05-17:40
+- 值班隔日下班 `dutyout`：值班隔日 08:05-08:40
 
-Retry and makeup:
+重試與補打：
 
-- Automatic retry delay: 2 minutes.
-- Maximum automatic retries: 3.
-- Makeup button timeout: 10 minutes.
-- `in` retry/makeup cutoff: strictly before 08:00.
+- 自動重試間隔：2 分鐘。
+- 自動重試上限：最多 3 次。
+- 補打按鈕有效時間：10 分鐘。
+- 上班 `in` 的自動重試與補打截止：必須嚴格早於 08:00。
 
-## Agent vs Skill
+## Agent 與 Skill 的分工
 
-Agent responsibilities:
+Agent 負責：
 
-- Read code and local docs.
-- Modify files in this repo.
-- Run validation.
-- Restart `PunchBotService` when needed.
-- Check logs.
-- Scan for secrets.
-- Commit and push to GitHub.
+- 閱讀程式碼與本機文件。
+- 修改這個 repository 內的檔案。
+- 執行驗證。
+- 必要時重啟 `PunchBotService`。
+- 檢查 log。
+- 掃描是否誤放秘密資料。
+- commit 並 push 到 GitHub。
 
-Skill responsibilities:
+Skill 負責：
 
-- Decide whether a punch should happen.
-- Explain retry, makeup, e-HR comparison, leave, duty, weekend, cancellation, and admin alert behavior.
-- Prevent business-rule mistakes while changing punch logic.
+- 判斷是否應該打卡。
+- 說明重試、補打按鈕、e-HR 比對、請假、值班、週末、取消日期與管理員告警規則。
+- 在修改打卡邏輯時，避免違反業務規則。
 
-Avoid duplicating detailed punch behavior here. Keep operational punch reasoning in `skill.md`.
+請避免在這裡重複描述太細的打卡流程。具體打卡判斷以 `skill.md` 為準。
 
-## Change Rules
+## 修改規則
 
-1. Before modifying runtime behavior, check whether the current time is near an active punch window.
-2. Prefer small patches. Do not do unrelated refactors.
-3. Preserve backward compatibility for `punch_data.json`; add defaults through `get_user_data()`.
-4. Write to `punched_today.json` only after confirmed success from the bot's perspective.
-5. Never allow automatic retry or makeup button confirmation to call `punch_clock(..., "in")` at or after 08:00.
-6. Keep long HTTP work off the Discord event loop.
-7. Do not print or document tokens, passwords, cookies, raw e-HR payloads, or full sensitive URLs.
-8. If slash commands are added, removed, or renamed, restart with the resync script.
+1. 修改會影響執行行為的內容前，先確認現在是否接近打卡時段。
+2. 優先做小範圍 patch，不做無關重構。
+3. 維持 `punch_data.json` 向後相容；新增欄位時透過 `get_user_data()` 補預設值。
+4. 只有在 bot 角度確認成功後，才能寫入 `punched_today.json`。
+5. 絕不能讓自動重試或補打按鈕在 08:00 或之後呼叫 `punch_clock(..., "in")`。
+6. 長時間 HTTP 工作不要卡住 Discord event loop。
+7. 不要印出或寫進文件：token、密碼、cookie、原始 e-HR payload、完整敏感 URL。
+8. 若新增、移除或改名 slash command，要用 resync script 重啟。
 
-## Validation
+## 驗證
 
-Always run:
+每次都要執行：
 
 ```powershell
 python -m py_compile bot_all_in_one.py
 ```
 
-For punch behavior changes, also verify:
+若修改打卡行為，也要確認：
 
-- `punched_today.json` keys prevent duplicate punches.
-- `schedule_today.json` preserves same-day random times.
-- `retry_queue` retries after 2 minutes and stops after 3 tries.
-- `in` makeup/retry has an 08:00 cutoff at scheduling time, retry execution time, and button confirmation time.
-- Admin alerts go to `admin-alert`, not `#一般`.
+- `punched_today.json` 的 key 能防止重複打卡。
+- `schedule_today.json` 會保留同一天既有的隨機時間。
+- `retry_queue` 會在 2 分鐘後重試，並在 3 次後停止。
+- 上班 `in` 的補打與重試，在排程當下、重試執行當下、按鈕確認當下，都有 08:00 截止檢查。
+- 管理員告警會送到 `admin-alert`，不是 `#一般`。
 
-Before GitHub upload, scan for sensitive material:
+上傳 GitHub 前，要掃描是否有敏感內容：
 
 ```powershell
 rg -n "DISCORD_TOKEN|EHR_BASE|pwd|password|token|密碼" README.md docs bot_all_in_one.py restart_bot_admin.ps1 restart_bot_resync_admin.ps1 .env.example agent.md skill.md
 ```
 
-Variable names and safe examples are acceptable. Real tokens, passwords, employee IDs, internal URLs, cookies, or logs are not.
+只出現變數名稱或安全範例可以接受。真實 token、密碼、員工編號、內部網址、cookie 或 log 不可以提交。
 
-## Restart
+## 重啟
 
-Normal restart:
+一般重啟：
 
 ```powershell
 Start-Process -FilePath "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File C:\punch_relay\restart_bot_admin.ps1 -NoPause" -Verb RunAs -WindowStyle Hidden
 ```
 
-Restart with slash command resync:
+需要同步 slash command 時重啟：
 
 ```powershell
 Start-Process -FilePath "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File C:\punch_relay\restart_bot_resync_admin.ps1 -NoPause" -Verb RunAs -WindowStyle Hidden
 ```
 
-After restart, confirm:
+重啟後確認：
 
-- `PunchBotService` is `Running`.
-- `bot.log` shows bot startup.
-- `auto_punch_task` started.
+- `PunchBotService` 狀態是 `Running`。
+- `bot.log` 有 bot 啟動紀錄。
+- `auto_punch_task` 已開始。
 
-## GitHub Rule
+## GitHub 規則
 
-Every completed change to code, settings examples, documentation, agent rules, or skills must be uploaded to GitHub.
+每次完成程式、設定範例、文件、agent 規則或 skill 規則的修改後，都必須上傳到 GitHub。
 
-Use:
+使用：
 
 ```powershell
 git -c safe.directory=C:/punch_relay status --short
@@ -134,7 +134,7 @@ git -c safe.directory=C:/punch_relay commit -m "<clear message>"
 git -c safe.directory=C:/punch_relay push origin main
 ```
 
-Before committing, confirm ignored sensitive files are not staged:
+commit 前要確認這些敏感或本機狀態檔沒有被 staged：
 
 - `.env`
 - `punch_data.json`
@@ -144,4 +144,4 @@ Before committing, confirm ignored sensitive files are not staged:
 - `bot.log`
 - `.codex-remote-attachments/`
 
-If push fails, do not force push, reset, rebase, or change remotes. Report the error and wait for user confirmation.
+如果 push 失敗，不要 force push、reset、rebase 或修改 remote。回報錯誤並等待使用者確認。

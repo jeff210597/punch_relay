@@ -1,146 +1,146 @@
 ---
 name: punch-procedure
-description: Repository-local operational skill for the punch_relay Discord punch bot. Use when diagnosing or changing punch eligibility, retry behavior, makeup buttons, duty/leave/cancel scheduling, e-HR comparison, admin alerts, or whether the bot should punch, retry, notify, or stop.
+description: punch_relay Discord 打卡機器人的 repository-local 操作 skill。當需要診斷或修改打卡資格、重試、補打按鈕、值班/請假/取消排程、e-HR 比對、管理員告警，或判斷 bot 是否應該打卡、重試、通知、停止時使用。
 ---
 
-# Punch Procedure Skill
+# 打卡程序 Skill
 
-## Scope
+## 適用範圍
 
-Use this file for punch behavior decisions in this repository. Use `agent.md` for development workflow, validation, restart, and GitHub publishing.
+這個檔案用來判斷本 repository 的打卡行為。開發流程、驗證、重啟與 GitHub 上傳規則請看 `agent.md`。
 
-## State Files
+## 狀態檔
 
-- `schedule_today.json`: today's random punch times. Do not re-randomize existing same-day schedules.
-- `punched_today.json`: successful local punch keys. Write only after success.
-- `admin_alerts_today.json`: admin alert de-duplication keys.
-- `punch_data.json`: user binding, duty days, leave days, cancel dates, and notification settings.
+- `schedule_today.json`：今天的隨機打卡時間。同一天已存在的排程不可重新隨機。
+- `punched_today.json`：本機成功打卡 key。只有成功後才能寫入。
+- `admin_alerts_today.json`：管理員告警去重 key。
+- `punch_data.json`：使用者綁定、值班日、請假日、取消日期與通知設定。
 
-## Punch Types And Keys
+## 打卡類型與 Key
 
-- 上班: `action="in"`, key `{uid}-in-{YYYY-MM-DD}`
-- 下班: `action="out"`, key `{uid}-out-{YYYY-MM-DD}`
-- 值班下班: `action="out"`, key `{uid}-dutyout-{YYYY-MM-DD}`
+- 上班：`action="in"`，key `{uid}-in-{YYYY-MM-DD}`
+- 下班：`action="out"`，key `{uid}-out-{YYYY-MM-DD}`
+- 值班隔日下班：`action="out"`，key `{uid}-dutyout-{YYYY-MM-DD}`
 
-`dutyout` calls e-HR as an `out` punch but must use its own local key.
+`dutyout` 呼叫 e-HR 時是下班 `out` 打卡，但本機必須使用獨立的 `dutyout` key。
 
-## Eligibility
+## 打卡資格
 
-Before automatic punching:
+自動打卡前必須先確認：
 
-- Require `empid`, `password`, and `auto_punch=True`.
-- Skip all automatic punch behavior for dates in `cancel_dates`, except no special override is currently allowed.
-- Skip normal punch on leave days.
-- Skip normal weekend punch unless the user is on duty today or was on duty yesterday.
-- Duty day: punch `in`; do not punch normal `out`.
-- Day after duty: skip `in`; punch `dutyout` when due.
-- Leave or weekend after duty can still require `dutyout`.
+- 必須有 `empid`、`password`，且 `auto_punch=True`。
+- 若日期在 `cancel_dates`，跳過所有自動打卡行為；目前沒有其他特殊覆蓋規則。
+- 請假日跳過一般打卡。
+- 週末跳過一般打卡，除非使用者今天值班或昨天值班。
+- 值班日：打上班卡，不打一般下班卡。
+- 值班隔日：跳過上班卡，到了時間打 `dutyout`。
+- 即使值班隔日遇到請假或週末，仍可能需要打 `dutyout`。
 
-## Due-Time Priority
+## 到期處理優先順序
 
-When multiple keys are due, process in this order:
+同一輪如果有多個 key 到期，處理順序如下：
 
 1. `dutyout`
-2. normal `out`
+2. 一般 `out`
 3. `in`
 
-This avoids an old missing morning key blocking afternoon or duty-after behavior.
+這樣可以避免早上漏掉的舊 key 擋住下午下班或值班隔日下班。
 
-## Success
+## 成功規則
 
-On successful automatic punch:
+自動打卡成功時：
 
-- Notify the user.
-- Save the correct key in `punched_today.json`.
-- Do not send admin alert.
-- Do not leave a retry queued for that key.
+- 通知使用者。
+- 將正確 key 寫入 `punched_today.json`。
+- 不通知管理員告警。
+- 不保留該 key 的 retry queue。
 
-If e-HR confirmation is delayed, local success can still be saved. Final comparison may later detect that e-HR is missing and alert.
+如果 e-HR 確認資料延遲，本機仍可先記錄成功。後續最終比對若發現 e-HR 仍缺紀錄，再另外告警。
 
-## Failure, Retry, And Makeup
+## 失敗、重試與補打
 
-On automatic punch failure:
+自動打卡失敗時：
 
-- Notify the user.
-- Send admin alert.
-- Queue retry after 2 minutes if allowed.
-- Retry at most 3 times.
-- Send makeup button if allowed.
+- 通知使用者。
+- 發送管理員告警。
+- 若規則允許，排入 2 分鐘後自動重試。
+- 最多自動重試 3 次。
+- 若規則允許，發送補打按鈕。
 
-`in` rules:
+上班 `in` 規則：
 
-- Retry and makeup only before 08:00.
-- At or after 08:00, do not call `punch_clock(..., "in")`.
-- If a queued `in` retry reaches 08:00, stop and alert.
-- If an old `in` makeup button is pressed at or after 08:00, reject it and alert.
+- 只能在 08:00 前自動重試與補打。
+- 08:00 或之後，不能呼叫 `punch_clock(..., "in")`。
+- 如果已排入的上班重試到達執行時間時已經 08:00，停止重試並告警。
+- 如果舊的上班補打按鈕在 08:00 或之後被按下，要拒絕並告警。
 
-`out` and `dutyout` rules:
+下班 `out` 與值班隔日下班 `dutyout` 規則：
 
-- Retry after 2 minutes, up to 3 times.
-- Makeup button remains valid for 10 minutes.
-- Final retry failure alerts admin and may send another makeup prompt.
+- 2 分鐘後重試，最多 3 次。
+- 補打按鈕有效 10 分鐘。
+- 最終重試失敗時通知管理員，並可再次提醒使用者補打。
 
-## Makeup Button
+## 補打按鈕
 
-Button timeout: 10 minutes.
+按鈕有效時間：10 分鐘。
 
-On confirm:
+按下確認時：
 
-1. Reload `punched_today.json`.
-2. If the key already exists, do not punch again.
-3. If action is `in` and current time is at or after 08:00, stop.
-4. Otherwise call `punch_clock()`.
-5. On success, save key and remove matching retry entry.
-6. On failure, tell user to handle manually.
+1. 重新讀取 `punched_today.json`。
+2. 如果 key 已存在，不要再次打卡。
+3. 如果 action 是 `in`，且目前時間是 08:00 或之後，停止。
+4. 否則呼叫 `punch_clock()`。
+5. 成功後寫入 key，並移除對應 retry entry。
+6. 失敗時告知使用者需手動處理。
 
-On cancel:
+按下取消時：
 
-- Do not punch.
-- Tell user to handle manually.
+- 不打卡。
+- 告知使用者需手動處理。
 
-On timeout:
+逾時時：
 
-- Tell user the makeup request expired.
+- 告知使用者補打請求已過期。
 
-## e-HR Comparison
+## e-HR 比對
 
-18:00 normal workday:
+18:00 一般工作日：
 
-- Check normal `out`.
-- If e-HR has `clock_out` or an inferred valid out time, stay silent.
-- If missing, notify user, send makeup button, and alert admin.
+- 檢查一般 `out`。
+- 如果 e-HR 有 `clock_out` 或可推定為有效下班時間，保持安靜。
+- 如果缺少紀錄，通知使用者、發送補打按鈕，並通知管理員。
 
-09:00 duty-after day:
+09:00 值班隔日：
 
-- Check `dutyout`.
-- If e-HR has `clock_out` or inferred valid dutyout time, stay silent.
-- If missing, notify user, send makeup button, and alert admin.
+- 檢查 `dutyout`。
+- 如果 e-HR 有 `clock_out` 或可推定為有效值班隔日下班時間，保持安靜。
+- 如果缺少紀錄，通知使用者、發送補打按鈕，並通知管理員。
 
-Do not treat expected skipped days as failures.
+預期本來就應該跳過的日期，不要視為失敗。
 
-## Admin Alerts
+## 管理員告警
 
-Send admin alert for:
+以下情況要發送管理員告警：
 
-- Automatic punch failure.
-- Retry stopped by 08:00 `in` cutoff.
-- Retry failed 3 times.
-- e-HR final comparison still missing.
-- `in` makeup button pressed after 08:00.
+- 自動打卡失敗。
+- 上班 `in` 重試因 08:00 截止而停止。
+- 重試 3 次後仍失敗。
+- e-HR 最終比對仍缺打卡紀錄。
+- 上班 `in` 補打按鈕在 08:00 或之後被按下。
 
-Do not alert for:
+以下情況不要告警：
 
-- Successful punch.
-- Expected skipped punch.
-- e-HR comparison with confirmed record.
+- 打卡成功。
+- 符合規則的預期跳過。
+- e-HR 比對確認已有紀錄。
 
-Destination:
+告警目的地：
 
-- Prefer `ADMIN_ALERT_CHANNEL_ID=1514929880448630904` (`admin-alert`).
-- Fall back to `ADMIN_IDS` only if the channel cannot be used.
+- 優先使用 `ADMIN_ALERT_CHANNEL_ID=1514929880448630904` (`admin-alert`)。
+- 只有在頻道無法使用時，才 fallback 到 `ADMIN_IDS` 私訊。
 
-Never include passwords, tokens, cookies, raw payloads, or full sensitive URLs.
+告警內容絕不能包含密碼、token、cookie、原始 payload 或完整敏感 URL。
 
-## Manual Punch Exception
+## 手動打卡例外
 
-The explicit `/打卡` command is manual. The 08:00 cutoff applies to automatic retry and makeup button behavior, not to an explicit manual user command.
+明確使用 `/打卡` 指令屬於手動操作。08:00 截止規則適用於自動重試與補打按鈕，不套用到使用者明確執行的手動指令。
