@@ -6,7 +6,8 @@
 
 - `bot_all_in_one.py`：主程式。
 - `start.bat`：Windows service 重啟腳本。
-- `docs/codex/agent.md`：給後續開發代理使用的維護指南。
+- `agent.md`：給後續開發代理使用的維護指南。
+- `skill.md`：打卡流程判斷與補打/告警規則 skill。
 - `docs/codex/vscode_tunnel_mobile_guide.md`：手機使用 VS Code Tunnel 遠端修改教學。
 - `docs/github/git_diff.md`：Git diff 說明。
 - `docs/github/github_upload_guide.md`：GitHub 安全上傳教學。
@@ -29,6 +30,7 @@
 - `punch_data.json`
 - `punched_today.json`
 - `schedule_today.json`
+- `admin_alerts_today.json`
 - `synced.flag`
 - `bot.log`
 
@@ -38,7 +40,8 @@
 
 - `README.md`
 - `.gitignore`
-- `docs/codex/agent.md`
+- `agent.md`
+- `skill.md`
 - `docs/codex/vscode_tunnel_mobile_guide.md`
 - `docs/github/git_diff.md`
 - `docs/github/github_upload_guide.md`
@@ -50,6 +53,7 @@
 - `punch_data.json`
 - `punched_today.json`
 - `schedule_today.json`
+- `admin_alerts_today.json`
 - `bot.log`
 - `synced.flag`
 - `.env`
@@ -62,8 +66,11 @@
 ```powershell
 setx DISCORD_TOKEN "你的 Discord bot token"
 setx NOTIFY_CHANNEL_ID "通知頻道 ID"
+setx ADMIN_ALERT_CHANNEL_ID "管理員異常告警私人頻道 ID"
 setx EHR_BASE "e-HR 系統網址"
 ```
+
+`ADMIN_ALERT_CHANNEL_ID` 為選填。若有設定，打卡失敗、重試失敗、e-HR 最終缺卡等管理員告警會優先發到該私人頻道；若未設定或 Bot 無法發送，會 fallback 私訊 `ADMIN_IDS` 管理員。
 
 設定後請重新開啟終端機或重啟 Windows service。
 

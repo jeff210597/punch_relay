@@ -54,6 +54,7 @@ load_local_env()
 # =====================
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
 NOTIFY_CHANNEL_ID = int(os.getenv("NOTIFY_CHANNEL_ID", "0"))
+ADMIN_ALERT_CHANNEL_ID = int(os.getenv("ADMIN_ALERT_CHANNEL_ID", "1514929880448630904"))
 
 EHR_BASE = os.getenv("EHR_BASE", "")
 PUNCH_URL = f"{EHR_BASE}/servlet/jform"
@@ -610,6 +611,10 @@ scheduled_times = {}
 
 PUNCHED_FILE = "punched_today.json"
 SCHEDULE_FILE = "schedule_today.json"
+ADMIN_ALERTS_FILE = "admin_alerts_today.json"
+RETRY_DELAY_MINUTES = 2
+MAX_RETRY_ATTEMPTS = 3
+PUNCH_IN_CUTOFF_MIN = 8 * 60
 
 def load_punched_today():
     """從檔案載入今天已打卡記錄，回傳 dict {key: "HH:MM"}"""
@@ -656,6 +661,78 @@ def save_schedule_today(schedules, today_str):
             json.dump({"date": today_str, "schedules": schedules}, f)
     except:
         pass
+
+def load_admin_alerts_today():
+    """載入今日已發送的管理員告警 key，避免重複洗版。"""
+    try:
+        if os.path.exists(ADMIN_ALERTS_FILE):
+            with open(ADMIN_ALERTS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            today_str = date.today().strftime("%Y-%m-%d")
+            if data.get("date") == today_str:
+                alerts = data.get("alerts", [])
+                return set(alerts) if isinstance(alerts, list) else set()
+    except:
+        pass
+    return set()
+
+def save_admin_alerts_today(alerts, today_str):
+    """儲存今日已發送的管理員告警 key。"""
+    try:
+        with open(ADMIN_ALERTS_FILE, "w", encoding="utf-8") as f:
+            json.dump({"date": today_str, "alerts": sorted(alerts)}, f, ensure_ascii=False, indent=2)
+    except:
+        pass
+
+def _admin_alert_key(uid, label, today_str, alert_type):
+    safe_label = (label or "unknown").replace(" ", "_")
+    return f"{uid}-{safe_label}-{today_str}-{alert_type}"
+
+async def send_admin_alert(client, uid, empid, label, alert_type, reason, status, scheduled_time=None):
+    """發送管理員異常告警；優先送私人頻道，失敗則私訊 ADMIN_IDS。"""
+    today_str = date.today().strftime("%Y-%m-%d")
+    alerts = load_admin_alerts_today()
+    alert_key = _admin_alert_key(uid, label, today_str, alert_type)
+    if alert_key in alerts:
+        return
+
+    lines = [
+        "🚨 **打卡異常告警**",
+        f"日期：{today_str}",
+        f"使用者：<@{uid}>",
+        f"員工編號：{empid}",
+        f"卡別：{label}",
+    ]
+    if scheduled_time:
+        lines.append(f"排程時間：{scheduled_time}")
+    lines.extend([
+        f"異常原因：{reason}",
+        f"處理狀態：{status}",
+    ])
+    message = "\n".join(lines)
+
+    sent = False
+    if ADMIN_ALERT_CHANNEL_ID > 0:
+        try:
+            channel = client.get_channel(ADMIN_ALERT_CHANNEL_ID) or await client.fetch_channel(ADMIN_ALERT_CHANNEL_ID)
+            if channel:
+                await channel.send(message)
+                sent = True
+        except Exception as e:
+            print(f"管理員告警頻道發送失敗：{e}")
+
+    if not sent:
+        for admin_id in globals().get("ADMIN_IDS", set()):
+            try:
+                admin_user = client.get_user(int(admin_id)) or await client.fetch_user(int(admin_id))
+                await admin_user.send(message)
+                sent = True
+            except Exception as e:
+                print(f"管理員告警私訊失敗 {admin_id}：{e}")
+
+    if sent:
+        alerts.add(alert_key)
+        save_admin_alerts_today(alerts, today_str)
 
 async def auto_punch_task(client):
     await client.wait_until_ready()
@@ -798,12 +875,13 @@ async def auto_punch_task(client):
                                 msg += "\n📋 e-HR 系統：查無今日刷卡記錄，請至系統確認"
                             await user.send(msg)
                         else:
-                            # 上班卡失敗不發補打按鈕（八點後補打會變遲到）
-                            rk = None
-                            retry_at = datetime.now() + timedelta(minutes=5)
-                            should_retry = action != "in" or retry_at < datetime.combine(today, datetime.min.time()) + timedelta(hours=8)
-                            if action != "in":
-                                rk = f"{uid}-dutyout-{today_str}" if label == "值班下班" else f"{uid}-out-{today_str}"
+                            rk = f"{uid}-in-{today_str}" if action == "in" else (
+                                f"{uid}-dutyout-{today_str}" if label == "值班下班" else f"{uid}-out-{today_str}"
+                            )
+                            now_for_retry = datetime.now()
+                            retry_at = now_for_retry + timedelta(minutes=RETRY_DELAY_MINUTES)
+                            is_in_after_cutoff = action == "in" and (now_for_retry.hour * 60 + now_for_retry.minute) >= PUNCH_IN_CUTOFF_MIN
+                            should_retry = not is_in_after_cutoff
                             if should_retry:
                                 retry_queue.append({
                                     "uid": uid,
@@ -812,14 +890,26 @@ async def auto_punch_task(client):
                                     "action": action,
                                     "label": label,
                                     "retry_at": retry_at,
-                                    "attempts": 1,
+                                    "attempts": 0,
                                     "retry_key": rk,
                                 })
-                                fail_msg = f"🤖 自動打卡通知\n❌ {label}打卡失敗：{result.get('message')}\n⏳ 將於 5 分鐘後自動重試"
+                                fail_msg = f"🤖 自動打卡通知\n❌ {label}打卡失敗：{result.get('message')}\n⏳ 將於 {RETRY_DELAY_MINUTES} 分鐘後自動重試"
+                                alert_status = f"已排入 {RETRY_DELAY_MINUTES} 分鐘後自動重試，最多 {MAX_RETRY_ATTEMPTS} 次"
                             else:
-                                fail_msg = f"🤖 自動打卡通知\n❌ {label}打卡失敗：{result.get('message')}\n⚠️ 已接近或超過 08:00，為避免遲到記錄，不自動重試上班卡"
+                                fail_msg = f"🤖 自動打卡通知\n❌ {label}打卡失敗：{result.get('message')}\n⚠️ 已達 08:00，為避免遲到記錄，不自動重試上班卡"
+                                alert_status = "已達 08:00，不自動補打上班卡，已提醒使用者自行確認"
                             await user.send(fail_msg)
-                            if should_retry and action != "in" and rk:
+                            await send_admin_alert(
+                                client=client,
+                                uid=uid,
+                                empid=empid,
+                                label=label,
+                                alert_type="auto_failed",
+                                reason=result.get("message", "自動打卡失敗"),
+                                status=alert_status,
+                                scheduled_time=times.get("in" if action == "in" else ("dutyout" if label == "值班下班" else "out")),
+                            )
+                            if should_retry and rk:
                                 makeup_view = MakeupPunchView(
                                     client_ref=client,
                                     uid=uid,
@@ -833,7 +923,7 @@ async def auto_punch_task(client):
                                     retry_key=rk,
                                 )
                                 await user.send(
-                                    f"🤖 **補打確認**\n⚠️ {label}卡自動打卡失敗，是否立即補打？\n（也可等待 5 分鐘後自動重試）",
+                                    f"🤖 **補打確認**\n⚠️ {label}卡自動打卡失敗，是否立即補打？\n（也可等待 {RETRY_DELAY_MINUTES} 分鐘後自動重試）",
                                     view=makeup_view
                                 )
                     except discord.Forbidden:
@@ -842,6 +932,17 @@ async def auto_punch_task(client):
                             await channel.send(f"⚠️ 無法私訊 <@{uid}>，請開啟私訊權限")
                     except Exception as e:
                         print(f"私訊失敗：{e}")
+                elif not result.get("success"):
+                    await send_admin_alert(
+                        client=client,
+                        uid=uid,
+                        empid=empid,
+                        label=label,
+                        alert_type="auto_failed",
+                        reason=result.get("message", "自動打卡失敗"),
+                        status="無法取得使用者私訊對象，管理員需協助確認",
+                        scheduled_time=times.get("in" if action == "in" else ("dutyout" if label == "值班下班" else "out")),
+                    )
 
         # ── 處理重試佇列（打卡失敗自動重試，最多3次）──
         now_dt = datetime.now()
@@ -853,6 +954,16 @@ async def auto_punch_task(client):
                         retry_user = client.get_user(int(item["uid"])) or await client.fetch_user(int(item["uid"]))
                         await retry_user.send(
                             f"🤖 重試打卡通知\n⚠️ {item['label']}卡已超過 08:00，為避免遲到記錄，不再自動重試\n請自行確認上班打卡狀況"
+                        )
+                        await send_admin_alert(
+                            client=client,
+                            uid=item["uid"],
+                            empid=item["empid"],
+                            label=item["label"],
+                            alert_type="retry_stopped_cutoff",
+                            reason="上班卡重試時間已達 08:00",
+                            status="停止自動補打，已提醒使用者自行確認",
+                            scheduled_time=scheduled_times.get(item["uid"], {}).get("in"),
                         )
                     except Exception as e:
                         print(f"重試通知失敗：{e}")
@@ -866,7 +977,8 @@ async def auto_punch_task(client):
                 except:
                     retry_user = None
                 if retry_user:
-                    attempt_str = f"（第 {item['attempts']+1} 次嘗試）"
+                    attempt_no = item["attempts"] + 1
+                    attempt_str = f"（第 {attempt_no} 次重試）"
                     rk = item.get("retry_key")
                     try:
                         if retry_result.get("success"):
@@ -877,16 +989,26 @@ async def auto_punch_task(client):
                             if retry_result.get("confirmed") and retry_result.get("times"):
                                 retry_msg += f"\n📋 e-HR 確認：{retry_result['times']}"
                             await retry_user.send(retry_msg)
-                        elif item["attempts"] < 3:
-                            next_retry = now_dt + timedelta(minutes=5)
+                        elif attempt_no < MAX_RETRY_ATTEMPTS:
+                            next_retry = now_dt + timedelta(minutes=RETRY_DELAY_MINUTES)
                             if item["action"] == "in" and next_retry >= datetime.combine(today, datetime.min.time()) + timedelta(hours=8):
                                 retry_msg = f"🤖 重試打卡通知 {attempt_str}\n❌ 仍然失敗：{retry_result.get('message')}\n⚠️ 下一次重試會超過 08:00，為避免遲到記錄，已停止自動重試上班卡"
+                                await send_admin_alert(
+                                    client=client,
+                                    uid=item["uid"],
+                                    empid=item["empid"],
+                                    label=item["label"],
+                                    alert_type="retry_stopped_cutoff",
+                                    reason=f"上班卡重試仍失敗：{retry_result.get('message')}",
+                                    status="下一次重試會超過 08:00，已停止自動補打",
+                                    scheduled_time=scheduled_times.get(item["uid"], {}).get("in"),
+                                )
                             else:
-                                still_retrying.append({**item, "retry_at": next_retry, "attempts": item["attempts"]+1})
-                                retry_msg = f"🤖 重試打卡通知 {attempt_str}\n❌ 仍然失敗：{retry_result.get('message')}\n⏳ 將於 5 分鐘後再試"
+                                still_retrying.append({**item, "retry_at": next_retry, "attempts": attempt_no})
+                                retry_msg = f"🤖 重試打卡通知 {attempt_str}\n❌ 仍然失敗：{retry_result.get('message')}\n⏳ 將於 {RETRY_DELAY_MINUTES} 分鐘後再試"
                             await retry_user.send(retry_msg)
-                            # 同步發補打按鈕（下班卡才發）
-                            if item["action"] != "in" and rk:
+                            # 同步發補打按鈕（上班卡僅在 08:00 前發）
+                            if rk and not (item["action"] == "in" and datetime.now().hour * 60 + datetime.now().minute >= PUNCH_IN_CUTOFF_MIN):
                                 makeup_view = MakeupPunchView(
                                     client_ref=client,
                                     uid=item["uid"],
@@ -904,10 +1026,20 @@ async def auto_punch_task(client):
                                     view=makeup_view
                                 )
                         else:
-                            retry_msg = f"🤖 重試打卡通知 {attempt_str}\n❌ 重試 3 次後仍失敗，請手動打卡\n原因：{retry_result.get('message')}"
+                            retry_msg = f"🤖 重試打卡通知 {attempt_str}\n❌ 重試 {MAX_RETRY_ATTEMPTS} 次後仍失敗，請手動打卡\n原因：{retry_result.get('message')}"
                             await retry_user.send(retry_msg)
-                            # 最終失敗也發一次補打按鈕
-                            if item["action"] != "in" and rk:
+                            await send_admin_alert(
+                                client=client,
+                                uid=item["uid"],
+                                empid=item["empid"],
+                                label=item["label"],
+                                alert_type="retry_final_failed",
+                                reason=retry_result.get("message", "重試後仍失敗"),
+                                status=f"已重試 {MAX_RETRY_ATTEMPTS} 次仍失敗，已提醒使用者手動處理",
+                                scheduled_time=scheduled_times.get(item["uid"], {}).get("in" if item["action"] == "in" else ("dutyout" if item["label"] == "值班下班" else "out")),
+                            )
+                            # 最終失敗也發一次補打按鈕（上班卡僅在 08:00 前發）
+                            if rk and not (item["action"] == "in" and datetime.now().hour * 60 + datetime.now().minute >= PUNCH_IN_CUTOFF_MIN):
                                 makeup_view = MakeupPunchView(
                                     client_ref=client,
                                     uid=item["uid"],
@@ -921,7 +1053,7 @@ async def auto_punch_task(client):
                                     retry_key=rk,
                                 )
                                 await retry_user.send(
-                                    f"🤖 **補打確認**\n⚠️ {item['label']}卡已重試 3 次仍失敗，是否手動補打？",
+                                    f"🤖 **補打確認**\n⚠️ {item['label']}卡已重試 {MAX_RETRY_ATTEMPTS} 次仍失敗，是否手動補打？",
                                     view=makeup_view
                                 )
                     except Exception as e:
@@ -1060,8 +1192,20 @@ async def auto_punch_task(client):
                         if rk_c in punched_c:
                             pt = punched_c[rk_c]
                             notify_msg = f"📋 **今日下班打卡確認（18:00）**\n⚠️ Bot 已在 {pt} 打卡，但 e-HR 尚未記錄到刷卡\n請確認是否需要補打"
+                            alert_reason_c = "Bot 已送出下班卡，但 e-HR 尚未記錄"
                         else:
                             notify_msg = f"📋 **今日下班打卡確認（18:00）**\n⚠️ 未偵測到任何下班打卡記錄\n請確認是否需要補打"
+                            alert_reason_c = "未偵測到任何下班打卡記錄"
+                        await send_admin_alert(
+                            client=client,
+                            uid=uid_c,
+                            empid=empid_c,
+                            label="下班",
+                            alert_type="ehr_missing_1800",
+                            reason=alert_reason_c,
+                            status="已通知使用者並發送補打按鈕",
+                            scheduled_time=scheduled_times.get(uid_c, {}).get("out"),
+                        )
                         check_user = client.get_user(int(uid_c)) or await client.fetch_user(int(uid_c))
                         await check_user.send(notify_msg)
                         makeup_view_c = MakeupPunchView(
@@ -1118,8 +1262,20 @@ async def auto_punch_task(client):
                         if rk_c2 in punched_c2:
                             pt2 = punched_c2[rk_c2]
                             notify_msg2 = f"📋 **今日值班下班打卡確認（09:00）**\n⚠️ Bot 已在 {pt2} 打卡，但 e-HR 尚未記錄到刷卡\n請確認是否需要補打"
+                            alert_reason_c2 = "Bot 已送出值班下班卡，但 e-HR 尚未記錄"
                         else:
                             notify_msg2 = f"📋 **今日值班下班打卡確認（09:00）**\n⚠️ 未偵測到任何值班下班打卡記錄\n請確認是否需要補打"
+                            alert_reason_c2 = "未偵測到任何值班下班打卡記錄"
+                        await send_admin_alert(
+                            client=client,
+                            uid=uid_c2,
+                            empid=empid_c2,
+                            label="值班下班",
+                            alert_type="ehr_missing_0900",
+                            reason=alert_reason_c2,
+                            status="已通知使用者並發送補打按鈕",
+                            scheduled_time=scheduled_times.get(uid_c2, {}).get("dutyout"),
+                        )
                         check_user2 = client.get_user(int(uid_c2)) or await client.fetch_user(int(uid_c2))
                         await check_user2.send(notify_msg2)
                         makeup_view_c2 = MakeupPunchView(
@@ -1444,6 +1600,25 @@ class MakeupPunchView(discord.ui.View):
                 view=None
             )
             return
+        if self.action == "in" and datetime.now().hour * 60 + datetime.now().minute >= PUNCH_IN_CUTOFF_MIN:
+            self.processed = True
+            if self.retry_key:
+                retry_queue[:] = [r for r in retry_queue if r.get("retry_key") != self.retry_key]
+            await interaction.edit_original_response(
+                content=f"🤖 **補打通知**\n⚠️ {self.label}卡已達 08:00，為避免遲到記錄，不再自動補打。\n請自行確認上班打卡狀況。",
+                view=None
+            )
+            await send_admin_alert(
+                client=self.client_ref,
+                uid=self.uid,
+                empid=self.empid,
+                label=self.label,
+                alert_type="makeup_stopped_cutoff",
+                reason="使用者按下補打按鈕時已達 08:00",
+                status="未執行上班補打，已提醒使用者自行確認",
+            )
+            return
+
         result = await asyncio.get_event_loop().run_in_executor(
             None, lambda: punch_clock(self.empid, self.password, self.action)
         )
@@ -2975,9 +3150,9 @@ async def help_command(interaction: discord.Interaction):
             "**⑤ 補打按鈕通知**（不受通知設定影響，永遠發送）\n"
             "　以下情況會私訊發送補打確認按鈕：\n"
             "　• Bot 重啟：發現排程時間已過但未打下班卡\n"
-            "　• 打卡失敗：自動打卡失敗時同步發出，可選擇立即補打或等待自動重試\n"
+            f"　• 打卡失敗：自動打卡失敗時同步發出，可選擇立即補打或等待 {RETRY_DELAY_MINUTES} 分鐘後自動重試\n"
             "　• 下班比對（18:00/09:00）：e-HR 無任何刷卡記錄時發出\n"
-            "　⚠️ 上班卡絕對不補打（八點後補打會造成遲到記錄）\n"
+            "　⚠️ 上班卡僅 08:00 前補打；08:00 後只提醒，不自動補打\n"
             "　按鈕有效時間為 10 分鐘，逾時需手動打卡\n\n"
             "⚠️ **打卡成功/失敗通知不受通知設定影響，永遠發送**\n\n"
             "🔕 `/通知全關` — 一鍵關閉以上四種通知\n"

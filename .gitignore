@@ -6,6 +6,7 @@ bot.log
 punch_data.json
 punched_today.json
 schedule_today.json
+admin_alerts_today.json
 synced.flag
 
 # Secrets and local environment
