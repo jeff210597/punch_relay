@@ -128,7 +128,7 @@ git push origin main
 
 Complete the GitHub browser/device login once when prompted. After that, future pushes should reuse the stored credential.
 
-5. If a user provides a GitHub PAT, use it only for GitHub credential setup or a single env-only push. Never write PATs to repository files, logs, remotes, scripts, or documentation.
+5. If a user provides a GitHub PAT, use it only for GitHub credential setup, a single env-only push, or the local `PunchRelayGitSync` service environment. Never write PATs to repository files, logs, remotes, scripts, or documentation.
 
 6. If the host cannot complete GitHub credential setup and GitHub connector tools are available, use the connector/API path for small text-only updates. For large or many-file syncs, ask for one-time GitHub authentication rather than manually reconstructing large files through the API.
 

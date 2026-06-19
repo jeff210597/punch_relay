@@ -8,6 +8,13 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $Root
 
+$env:HTTP_PROXY = ""
+$env:HTTPS_PROXY = ""
+$env:ALL_PROXY = ""
+$env:GIT_HTTP_PROXY = ""
+$env:GIT_HTTPS_PROXY = ""
+$env:GIT_TERMINAL_PROMPT = "0"
+
 function Write-SyncLog {
     param([string]$Message)
     $stamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
@@ -40,9 +47,24 @@ function Find-Git {
 
 function Invoke-Git {
     param([Parameter(ValueFromRemainingArguments = $true)][string[]]$GitArgs)
-    & $GitExe @GitArgs
+    & $GitExe -c http.sslBackend=openssl @GitArgs
     if ($LASTEXITCODE -ne 0) {
         throw "git $($GitArgs -join ' ') failed with exit code $LASTEXITCODE"
+    }
+}
+
+function Invoke-GitPush {
+    if ($env:GITHUB_PAT) {
+        $pair = "x-access-token:$($env:GITHUB_PAT)"
+        $basic = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($pair))
+        & $GitExe -c http.sslBackend=openssl -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $basic" push origin main
+    }
+    else {
+        & $GitExe -c http.sslBackend=openssl push origin main
+    }
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "git push origin main failed with exit code $LASTEXITCODE"
     }
 }
 
@@ -137,5 +159,5 @@ if ($NoPush) {
     exit 0
 }
 
-Invoke-Git push origin main
+Invoke-GitPush
 Write-SyncLog "push complete"

@@ -96,7 +96,7 @@ powershell -ExecutionPolicy Bypass -File .\restart_bot_admin.ps1
 
 The PAT only proves push permission. Folder change detection is handled by a separate watcher service.
 
-1. Make sure GitHub HTTPS authentication works once on the host. Prefer Git Credential Manager or a secure PAT credential. Do not store the PAT inside this repository.
+1. Make sure GitHub HTTPS authentication works once on the host. Prefer Git Credential Manager for interactive use. For the Windows service, pass a PAT during installation so LocalSystem can push without an interactive login. Do not store the PAT inside this repository.
 
 2. Test a safe sync manually:
 
@@ -111,6 +111,14 @@ powershell -ExecutionPolicy Bypass -File .\install_github_sync_watcher_admin.ps1
 ```
 
 The service name is `PunchRelayGitSync`. It watches the repository folder and runs `sync_to_github.ps1` after changes settle for 45 seconds.
+
+To give the service push permission, run the installer with a local PAT value:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install_github_sync_watcher_admin.ps1 -GitHubPat "your PAT"
+```
+
+This stores the PAT in the local Windows service environment, not in Git or repository files.
 
 Check it with:
 

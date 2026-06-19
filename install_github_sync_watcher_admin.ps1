@@ -1,3 +1,8 @@
+$GitHubPat = $null
+if ($args.Count -ge 2 -and $args[0] -eq "-GitHubPat") {
+    $GitHubPat = [string]$args[1]
+}
+
 $ErrorActionPreference = "Stop"
 
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -50,6 +55,9 @@ else {
 & $Nssm set $ServiceName AppRotateOnline 1 | Out-Null
 & $Nssm set $ServiceName AppRotateBytes 1048576 | Out-Null
 & $Nssm set $ServiceName Start SERVICE_AUTO_START | Out-Null
+if ($GitHubPat) {
+    & $Nssm set $ServiceName AppEnvironmentExtra "GITHUB_PAT=$GitHubPat" | Out-Null
+}
 
 Start-Service -Name $ServiceName
 Get-Service -Name $ServiceName
