@@ -20,10 +20,12 @@ function Find-Git {
         return $git.Source
     }
 
-    $documents = Split-Path -Parent (Split-Path -Parent $Root)
+    $parent = Split-Path -Parent $Root
+    $documents = Split-Path -Parent $parent
     $candidates = @(
         (Join-Path $Root "PortableGit\mingw64\bin\git.exe"),
-        (Join-Path (Split-Path -Parent $Root) "PortableGit\mingw64\bin\git.exe"),
+        (Join-Path $parent "PortableGit\mingw64\bin\git.exe"),
+        (Join-Path $parent "work\PortableGit\mingw64\bin\git.exe"),
         (Join-Path $documents "work\PortableGit\mingw64\bin\git.exe")
     )
 
