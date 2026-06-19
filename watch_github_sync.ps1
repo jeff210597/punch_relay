@@ -55,12 +55,11 @@ $action = {
     Write-WatcherLog "change detected: $($Event.SourceEventArgs.ChangeType) $($Event.SourceEventArgs.FullPath)"
 }
 
-$registrations = @(
-    Register-ObjectEvent $watcher Changed -Action $action,
-    Register-ObjectEvent $watcher Created -Action $action,
-    Register-ObjectEvent $watcher Deleted -Action $action,
-    Register-ObjectEvent $watcher Renamed -Action $action
-)
+$registrations = @()
+$registrations += Register-ObjectEvent $watcher Changed -Action $action
+$registrations += Register-ObjectEvent $watcher Created -Action $action
+$registrations += Register-ObjectEvent $watcher Deleted -Action $action
+$registrations += Register-ObjectEvent $watcher Renamed -Action $action
 
 try {
     while ($true) {
