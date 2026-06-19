@@ -6,12 +6,25 @@ if %errorlevel% neq 0 (
     exit
 )
 title Bot Launcher
+set "NSSM_PATH=C:\punch_relay\tools\nssm\win32\nssm.exe"
+
+if exist "%ProgramFiles(x86)%" (
+    set "NSSM_PATH=C:\punch_relay\tools\nssm\win64\nssm.exe"
+)
+
+if not exist "%NSSM_PATH%" (
+    echo [ERROR] NSSM executable not found:
+    echo %NSSM_PATH%
+    pause
+    exit /b 1
+)
+
 echo ================================
 echo         Bot Launcher
 echo ================================
 echo.
 echo Stopping old Bot...
-"C:\punch_relay\nssm.exe" stop PunchBotService 2>nul
+"%NSSM_PATH%" stop PunchBotService 2>nul
 taskkill /f /im python.exe 2>nul
 timeout /t 2 /nobreak > nul
 echo.
@@ -34,7 +47,7 @@ if exist "C:\punch_relay\synced.flag" (
 )
 echo.
 echo Starting Bot...
-"C:\punch_relay\nssm.exe" start PunchBotService
+"%NSSM_PATH%" start PunchBotService
 echo.
 echo [OK] Bot started! Closing in 3 seconds...
 timeout /t 3 /nobreak > nul
