@@ -2,6 +2,8 @@
 *.log
 bot.log
 github_sync.log
+github_sync_watcher.log
+github_sync_service.log
 
 # Local state and sensitive user data
 punch_data.json

@@ -44,8 +44,8 @@ else {
 
 & $Nssm set $ServiceName DisplayName $DisplayName | Out-Null
 & $Nssm set $ServiceName AppDirectory $Root | Out-Null
-& $Nssm set $ServiceName AppStdout (Join-Path $Root "github_sync.log") | Out-Null
-& $Nssm set $ServiceName AppStderr (Join-Path $Root "github_sync.log") | Out-Null
+& $Nssm set $ServiceName AppStdout (Join-Path $Root "github_sync_service.log") | Out-Null
+& $Nssm set $ServiceName AppStderr (Join-Path $Root "github_sync_service.log") | Out-Null
 & $Nssm set $ServiceName AppRotateFiles 1 | Out-Null
 & $Nssm set $ServiceName AppRotateOnline 1 | Out-Null
 & $Nssm set $ServiceName AppRotateBytes 1048576 | Out-Null

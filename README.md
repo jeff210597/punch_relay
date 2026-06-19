@@ -28,6 +28,8 @@ The following files contain secrets, personal data, runtime state, or logs and a
 - `synced.flag`
 - `bot.log`
 - `github_sync.log`
+- `github_sync_watcher.log`
+- `github_sync_service.log`
 - `*.bak`
 - `__pycache__/`
 
@@ -114,6 +116,7 @@ Check it with:
 
 ```powershell
 Get-Service PunchRelayGitSync
+Get-Content .\github_sync_watcher.log -Tail 50
 Get-Content .\github_sync.log -Tail 50
 ```
 

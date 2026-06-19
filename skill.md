@@ -34,6 +34,8 @@ Never stage or upload:
 - `admin_alerts_today.json`
 - `bot.log`
 - `github_sync.log`
+- `github_sync_watcher.log`
+- `github_sync_service.log`
 - `synced.flag`
 - `*.bak`
 - `__pycache__/`
@@ -98,7 +100,7 @@ Install the watcher from an Administrator PowerShell:
 powershell -ExecutionPolicy Bypass -File .\install_github_sync_watcher_admin.ps1
 ```
 
-The watcher runs `watch_github_sync.ps1`, ignores local runtime and secret files, waits 45 seconds after changes settle, then runs `sync_to_github.ps1`. The sync script refuses to stage `.env`, runtime JSON, logs, backup files, obvious Discord/GitHub tokens, or password-like staged content.
+The watcher runs `watch_github_sync.ps1`, ignores local runtime and secret files, waits 45 seconds after changes settle, then runs `sync_to_github.ps1`. The sync script refuses to stage `.env`, runtime JSON, logs, backup files, obvious Discord/GitHub tokens, or password-like staged content. Keep watcher logs separate from NSSM stdout/stderr logs so the service does not lock its own log file.
 
 ## Stable GitHub Authentication Policy
 

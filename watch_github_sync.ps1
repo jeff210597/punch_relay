@@ -2,7 +2,7 @@ $ErrorActionPreference = "Stop"
 
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $SyncScript = Join-Path $Root "sync_to_github.ps1"
-$LogPath = Join-Path $Root "github_sync.log"
+$LogPath = Join-Path $Root "github_sync_watcher.log"
 $DebounceSeconds = 45
 
 function Write-WatcherLog {
