@@ -1,7 +1,6 @@
-$GitHubPat = $null
-if ($args.Count -ge 2 -and $args[0] -eq "-GitHubPat") {
-    $GitHubPat = [string]$args[1]
-}
+param(
+    [string]$GitHubPat = ""
+)
 
 $ErrorActionPreference = "Stop"
 
