@@ -1,31 +1,31 @@
 ---
 name: punch-procedure
-description: Repository-local operating rules for maintaining and deploying the punch_relay Discord bot.
+description: 維護與部署 punch_relay Discord bot 時使用的 repository-local 操作規則。
 ---
 
 # Punch Relay Skill
 
-Use this skill whenever working on the `punch_relay` bot, its Windows service scripts, deployment files, GitHub sync, or runtime verification.
+在處理 `punch_relay` bot、Windows 服務腳本、部署檔案、GitHub 同步或執行狀態驗證時，使用這份規則。
 
-## Core Rule
+## 核心規則
 
-After any change under a punch relay project folder, sync the intended repository changes to:
+在任何 punch relay 專案資料夾內完成變更後，應將預期要進 repository 的變更同步到：
 
 ```text
 https://github.com/jeff210597/punch_relay
 ```
 
-Do not leave deployable code, service scripts, docs, or bundled tool changes only on the host. Runtime state and secrets must stay local.
+不要讓可部署程式碼、服務腳本、文件或內建工具變更只留在主機本機。runtime 狀態與密鑰必須留在本機。
 
-Keep the Windows auto-sync service installed and running on maintained hosts unless the user explicitly disables automatic upload:
+除非使用者明確停用自動上傳，維護中的主機應保持 Windows 自動同步服務已安裝且正在執行：
 
 ```text
 PunchRelayGitSync
 ```
 
-## Never Commit
+## 永遠不要 Commit
 
-Never stage or upload:
+不要 stage 或上傳下列檔案：
 
 - `.env`
 - `punch_data.json`
@@ -41,23 +41,23 @@ Never stage or upload:
 - `__pycache__/`
 - `.codex-remote-attachments/`
 
-Before any commit or GitHub API update, scan for real secrets:
+在任何 commit 或 GitHub API 更新前，先掃描真實密鑰：
 
 ```powershell
 rg -n "DISCORD_TOKEN|EHR_BASE|pwd|password|token|密碼" README.md docs bot_all_in_one.py restart_bot_admin.ps1 restart_bot_resync_admin.ps1 .env.example agent.md skill.md sync_to_github.ps1 watch_github_sync.ps1 install_github_sync_watcher_admin.ps1
 ```
 
-Variable names and placeholders are allowed. Real Discord tokens, GitHub tokens, e-HR URLs, passwords, cookies, and user data are not allowed.
+變數名稱與 placeholder 可以存在。真實 Discord token、GitHub token、e-HR URL、密碼、cookie 和使用者資料不能存在。
 
-## Required Validation
+## 必要驗證
 
-For code changes, run:
+若變更程式碼，執行：
 
 ```powershell
 python -m py_compile bot_all_in_one.py
 ```
 
-For deployment/script changes, also verify:
+若變更部署或腳本，也要確認：
 
 ```powershell
 Test-Path tools\nssm\win32\nssm.exe
@@ -65,90 +65,94 @@ Test-Path tools\nssm\win64\nssm.exe
 rg -n "C:\\punch_relay|C:\\Users\\7b\\Documents\\punch_relay" README.md docs agent.md skill.md bot_all_in_one.py start.bat restart_bot_admin.ps1 restart_bot_resync_admin.ps1 install_nssm_service_admin.ps1 sync_to_github.ps1 watch_github_sync.ps1 install_github_sync_watcher_admin.ps1
 ```
 
-The path scan should return no fixed project-root dependencies. Scripts should use their own location as the project root.
+路徑掃描不應出現固定專案根目錄依賴。腳本應使用自身所在位置作為專案根目錄。
 
-## GitHub Sync Procedure
+## GitHub 同步流程
 
-1. Prefer the built-in sync script for routine host changes:
+1. 一般主機變更優先使用內建同步腳本：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\sync_to_github.ps1
 ```
 
-2. Inspect local changes manually when the sync script fails or before larger edits:
+2. 同步腳本失敗，或較大範圍修改前，手動檢查本機變更：
 
 ```powershell
 git status --short --branch
 git diff
 ```
 
-3. Stage only intended repository files. Prefer explicit paths. Do not use broad staging when runtime files are present.
+3. 只 stage 預期進 repository 的檔案。優先使用明確檔案路徑；有 runtime 檔案時不要做大範圍 staging。
 
-4. Commit with a clear message.
+4. 使用清楚的 commit message。
 
-5. Push to `main`:
+5. Push 到 `main`：
 
 ```powershell
 git push origin main
 ```
 
-## Auto Sync Service
+## 自動同步服務
 
-Install the watcher from an Administrator PowerShell:
+用系統管理員 PowerShell 安裝 watcher：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install_github_sync_watcher_admin.ps1
 ```
 
-The watcher runs `watch_github_sync.ps1`, ignores local runtime and secret files, waits 45 seconds after changes settle, then runs `sync_to_github.ps1`. The sync script refuses to stage `.env`, runtime JSON, logs, backup files, obvious Discord/GitHub tokens, or password-like staged content. Keep watcher logs separate from NSSM stdout/stderr logs so the service does not lock its own log file.
+watcher 會執行 `watch_github_sync.ps1`，忽略本機 runtime 與密鑰檔案，在變更穩定 45 秒後執行 `sync_to_github.ps1`。同步腳本會拒絕 stage `.env`、runtime JSON、log、備份檔、明顯的 Discord/GitHub token，或類似密碼的 staged 內容。watcher log 應和 NSSM stdout/stderr log 分開，避免服務鎖住自己的 log 檔。
 
-## Stable GitHub Authentication Policy
+## 穩定 GitHub 驗證政策
 
-Do not repeatedly retry `git push` when authentication is missing. It wastes time and tokens.
+GitHub 驗證缺失時，不要一直重試 `git push`，這會浪費時間與 token。
 
-Use this sequence:
+使用這個順序：
 
-1. Try one normal `git push origin main`.
+1. 先嘗試一次正常 push：
 
-2. If it hangs or times out, run one non-interactive diagnostic:
+```powershell
+git push origin main
+```
+
+2. 如果卡住或 timeout，執行一次非互動診斷：
 
 ```powershell
 $env:GIT_TERMINAL_PROMPT='0'
 git -c credential.helper= push origin main
 ```
 
-3. If the diagnostic says it cannot read the GitHub username, stop retrying local push.
+3. 如果診斷訊息表示無法讀取 GitHub username，就停止重試本機 push。
 
-4. Prefer a stable credential setup before continuing:
+4. 繼續前，優先建立穩定 credential：
 
 ```powershell
 git config --global credential.helper manager
 git push origin main
 ```
 
-Complete the GitHub browser/device login once when prompted. After that, future pushes should reuse the stored credential.
+出現提示時完成一次 GitHub browser/device login。之後的 push 應會重用已儲存 credential。
 
-5. If a user provides a GitHub PAT, use it only for GitHub credential setup, a single env-only push, or the local `PunchRelayGitSync` service environment. Never write PATs to repository files, logs, remotes, scripts, or documentation.
+5. 如果使用者提供 GitHub PAT，只能用於 GitHub credential setup、單次 env-only push，或本機 `PunchRelayGitSync` 服務環境。不要把 PAT 寫進 repository 檔案、log、remote、script 或文件。
 
-6. If the host cannot complete GitHub credential setup and GitHub connector tools are available, use the connector/API path for small text-only updates. For large or many-file syncs, ask for one-time GitHub authentication rather than manually reconstructing large files through the API.
+6. 如果主機無法完成 GitHub credential setup，且 GitHub connector tools 可用，少量文字更新可改用 connector/API 路徑。大量或多檔同步時，應要求一次性 GitHub 驗證，不要手動透過 API 重建大量檔案。
 
-7. Never force-push, reset, or rebase unless explicitly requested.
+7. 除非使用者明確要求，不要 force-push、reset 或 rebase。
 
-## Deployment Expectations
+## 部署預期
 
-The repository should be enough to rebuild a new host:
+repository 應足以重建新主機：
 
-1. Clone the repo.
-2. Install Python and `pip install -r requirements.txt`.
-3. Copy `.env.example` to `.env` and fill secrets locally.
-4. Run `python -m py_compile bot_all_in_one.py`.
-5. Run `install_nssm_service_admin.ps1` as Administrator.
-6. Use `restart_bot_resync_admin.ps1` when slash commands changed.
-7. Run `install_github_sync_watcher_admin.ps1` as Administrator to enable automatic GitHub sync.
+1. Clone repository。
+2. 安裝 Python，並執行 `pip install -r requirements.txt`。
+3. 複製 `.env.example` 成 `.env`，本機填入密鑰。
+4. 執行 `python -m py_compile bot_all_in_one.py`。
+5. 以系統管理員身分執行 `install_nssm_service_admin.ps1`。
+6. slash commands 有變更時，執行 `restart_bot_resync_admin.ps1`。
+7. 以系統管理員身分執行 `install_github_sync_watcher_admin.ps1`，啟用 GitHub 自動同步。
 
-The repo includes both NSSM binaries:
+repository 包含兩個 NSSM 執行檔：
 
 - `tools/nssm/win32/nssm.exe`
 - `tools/nssm/win64/nssm.exe`
 
-Do not require a fixed install directory such as `C:\punch_relay`.
+不要要求固定安裝目錄，例如 `C:\punch_relay`。
