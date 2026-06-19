@@ -4,7 +4,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $serviceName = "PunchBotService"
-$root = "C:\punch_relay"
+$root = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 
 function Assert-Admin {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()

@@ -6,10 +6,11 @@ if %errorlevel% neq 0 (
     exit
 )
 title Bot Launcher
-set "NSSM_PATH=C:\punch_relay\tools\nssm\win32\nssm.exe"
+set "ROOT_DIR=%~dp0"
+set "NSSM_PATH=%ROOT_DIR%tools\nssm\win32\nssm.exe"
 
 if exist "%ProgramFiles(x86)%" (
-    set "NSSM_PATH=C:\punch_relay\tools\nssm\win64\nssm.exe"
+    set "NSSM_PATH=%ROOT_DIR%tools\nssm\win64\nssm.exe"
 )
 
 if not exist "%NSSM_PATH%" (
@@ -28,7 +29,7 @@ echo Stopping old Bot...
 taskkill /f /im python.exe 2>nul
 timeout /t 2 /nobreak > nul
 echo.
-if exist "C:\punch_relay\synced.flag" (
+if exist "%ROOT_DIR%synced.flag" (
     echo Status: Commands already synced
     echo.
     echo Resync Discord commands? [Y=Yes / N=No]
@@ -39,7 +40,7 @@ if exist "C:\punch_relay\synced.flag" (
     if errorlevel 2 (
         echo Skipping resync, starting Bot...
     ) else (
-        del "C:\punch_relay\synced.flag"
+        del "%ROOT_DIR%synced.flag"
         echo Sync flag removed, will resync...
     )
 ) else (

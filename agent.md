@@ -105,13 +105,15 @@ rg -n "DISCORD_TOKEN|EHR_BASE|pwd|password|token|密碼" README.md docs bot_all_
 一般重啟：
 
 ```powershell
-Start-Process -FilePath "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File C:\punch_relay\restart_bot_admin.ps1 -NoPause" -Verb RunAs -WindowStyle Hidden
+$root = (Get-Location).Path
+Start-Process -FilePath "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$root\restart_bot_admin.ps1`" -NoPause" -Verb RunAs -WindowStyle Hidden
 ```
 
 需要同步 slash command 時重啟：
 
 ```powershell
-Start-Process -FilePath "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File C:\punch_relay\restart_bot_resync_admin.ps1 -NoPause" -Verb RunAs -WindowStyle Hidden
+$root = (Get-Location).Path
+Start-Process -FilePath "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$root\restart_bot_resync_admin.ps1`" -NoPause" -Verb RunAs -WindowStyle Hidden
 ```
 
 重啟後確認：

@@ -4,7 +4,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $serviceName = "PunchBotService"
-$root = "C:\punch_relay"
+$root = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 $syncFlag = Join-Path $root "synced.flag"
 
 function Assert-Admin {

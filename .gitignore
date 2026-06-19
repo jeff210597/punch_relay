@@ -16,6 +16,19 @@ synced.flag
 
 # Windows service binary / local tools
 nssm.exe
+!tools/
+!tools/nssm/
+!tools/nssm/win32/
+!tools/nssm/win32/nssm.exe
+!tools/nssm/win64/
+!tools/nssm/win64/nssm.exe
+
+# Local migration helpers / backups
+*.bak
+apply_admin_patch.py
+install_service_admin.ps1
+punch_bot_service.py
+install_nssm_service.log
 
 # Python cache
 __pycache__/

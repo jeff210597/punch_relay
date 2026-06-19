@@ -56,7 +56,7 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
 NOTIFY_CHANNEL_ID = int(os.getenv("NOTIFY_CHANNEL_ID", "0"))
 ADMIN_ALERT_CHANNEL_ID = int(os.getenv("ADMIN_ALERT_CHANNEL_ID", "1514929880448630904"))
 
-EHR_BASE = os.getenv("EHR_BASE", "")
+EHR_BASE = os.getenv("EHR_BASE", "").rstrip("/")
 PUNCH_URL = f"{EHR_BASE}/servlet/jform"
 FILE_PARAM = "hrm6p_edu.pkg,hrm6p.pkg,hrm6p_out_M1.pkg,hrm6fw_edu.pkg,hrm6bw.pkg,hrm6aw_edu.pkg,hrm6jw_edu.pkg,hrm6p_out_M21.pkg"
 
@@ -74,7 +74,7 @@ def validate_required_config():
         msg = (
             "❌ Bot 啟動設定不完整，已停止啟動。\n"
             f"缺少或無效設定：{', '.join(missing)}\n"
-            "請確認 C:\\punch_relay\\.env 內已設定 DISCORD_TOKEN、NOTIFY_CHANNEL_ID、EHR_BASE。"
+            "請確認 bot 所在資料夾的 .env 內已設定 DISCORD_TOKEN、NOTIFY_CHANNEL_ID、EHR_BASE。"
         )
         print(msg)
         raise SystemExit(1)
@@ -146,6 +146,34 @@ def save_user_data(user_id, user_data):
     data = load_data()
     data[str(user_id)] = user_data
     save_data(data)
+
+def mark_rebind_confirm_only(user_data):
+    """After binding, past-due punches require user confirmation instead of auto catch-up."""
+    now = datetime.now()
+    today_str = date.today().strftime("%Y-%m-%d")
+    user_data["rebind_confirm_only"] = {
+        "date": today_str,
+        "bound_at_min": now.hour * 60 + now.minute,
+        "notified_keys": [],
+    }
+
+def should_confirm_after_rebind(user_data, today_str, punch_key, scheduled_min):
+    rule = user_data.get("rebind_confirm_only") or {}
+    if rule.get("date") != today_str:
+        return False
+    try:
+        bound_at_min = int(rule.get("bound_at_min", -1))
+    except Exception:
+        return False
+    notified = set(rule.get("notified_keys", []))
+    return 0 <= scheduled_min <= bound_at_min and punch_key not in notified
+
+def mark_rebind_confirm_notified(user_id, user_data, punch_key):
+    rule = user_data.setdefault("rebind_confirm_only", {})
+    notified = rule.setdefault("notified_keys", [])
+    if punch_key not in notified:
+        notified.append(punch_key)
+    save_user_data(user_id, user_data)
 
 def validate_ehr_login(empid, password):
     """只驗證 e-HR 帳密，不執行打卡。"""
@@ -852,6 +880,39 @@ async def auto_punch_task(client):
                     action = None
                     label = ""
                 # 注意：不在此處寫入 punched_today，等打卡成功後才寫入
+
+            if action:
+                scheduled_min_for_action = _t2m(times.get("in" if action == "in" else ("dutyout" if label == "值班下班" else "out"), ""))
+                if should_confirm_after_rebind(user_data, today_str, punch_key, scheduled_min_for_action):
+                    try:
+                        user = client.get_user(int(uid)) or await client.fetch_user(int(uid))
+                    except:
+                        user = None
+                    if user:
+                        try:
+                            makeup_view = MakeupPunchView(
+                                client_ref=client,
+                                uid=uid,
+                                empid=empid,
+                                password=password,
+                                action=action,
+                                label=label,
+                                punch_key=punch_key,
+                                punched_today_ref=punched_today,
+                                today_str=today_str,
+                                retry_key=punch_key,
+                            )
+                            await user.send(
+                                f"📋 **重新綁定後補打確認**\n"
+                                f"⚠️ {label}卡排程時間已在本次綁定前經過，系統不會自動補打。\n"
+                                f"如確定今天仍需要補打，請按下確認補打。",
+                                view=makeup_view
+                            )
+                        except Exception as e:
+                            print(f"重新綁定補打確認通知失敗 {uid}：{e}")
+                    mark_rebind_confirm_notified(uid, user_data, punch_key)
+                    action = None
+                    label = ""
 
             if action:
                 result = await asyncio.get_event_loop().run_in_executor(
@@ -1563,9 +1624,104 @@ intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
+def is_admin_user(user_id):
+    return user_id in globals().get("ADMIN_IDS", set())
+
+async def reject_non_admin(interaction):
+    if is_admin_user(interaction.user.id):
+        return False
+    embed = discord.Embed(title="❌ 權限不足", description="此指令僅限管理員使用", color=0xff0000)
+    if interaction.response.is_done():
+        await interaction.followup.send(embed=embed, ephemeral=True)
+    else:
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+    return True
+
+def update_date_setting(user_data, field, raw_dates, mode):
+    if field not in user_data:
+        user_data[field] = []
+    if mode == "reset":
+        user_data[field] = []
+
+    year = date.today().year
+    added, removed, failed = [], [], []
+
+    for raw in raw_dates.split():
+        try:
+            parts = raw.replace("／", "/").split("/")
+            if len(parts) != 2:
+                failed.append(raw)
+                continue
+            month, day = int(parts[0]), int(parts[1])
+            date_str = date(year, month, day).strftime("%Y-%m-%d")
+            display = f"{month}/{day}"
+
+            if mode in ("reset", "add"):
+                if date_str not in user_data[field]:
+                    user_data[field].append(date_str)
+                added.append(display)
+            elif mode == "remove":
+                if date_str in user_data[field]:
+                    user_data[field].remove(date_str)
+                    removed.append(display)
+                else:
+                    failed.append(f"{display}（不在清單）")
+        except Exception:
+            failed.append(raw)
+
+    user_data[field] = sorted(user_data[field])
+    return added, removed, failed
+
+def build_date_setting_embed(kind, mode, added, removed, failed, target_user=None):
+    is_duty = kind == "duty"
+    title_map = {
+        ("duty", "reset"): "🌙 值班日重設",
+        ("duty", "add"): "🌙 新增值班日",
+        ("duty", "remove"): "🗑️ 取消值班日",
+        ("leave", "reset"): "🏖️ 休假日重設",
+        ("leave", "add"): "🏖️ 新增休假日",
+        ("leave", "remove"): "🗑️ 取消休假日",
+    }
+    label = "值班日" if is_duty else "休假日"
+    color = 0x9b59b6 if is_duty else 0x3498db
+    if mode == "remove":
+        color = 0xffaa00
+
+    target_prefix = f"對象：{target_user.mention}\n\n" if target_user else ""
+    if mode == "reset":
+        desc = target_prefix + f"⚠️ 原有{label}設定已清空，重新設定為：\n\n"
+        desc += f"✅ {label}：{', '.join(added)}" if added else f"（無設定任何{label}）"
+    elif mode == "add":
+        desc = target_prefix
+        if added:
+            desc += f"✅ 已新增{label}：{', '.join(added)}"
+    else:
+        desc = target_prefix
+        if removed:
+            desc += f"✅ 已取消{label}：{', '.join(removed)}\n"
+
+    if is_duty and mode in ("reset", "add") and added:
+        desc += "\n\n值班打卡時間：\n⏰ 當天 07:00~07:40 上班卡（隨機）\n⏰ 隔天 08:05~08:40 下班卡（隨機）"
+    elif not is_duty and mode in ("reset", "add") and added:
+        desc += "\n當天不會自動打卡"
+
+    if failed:
+        if mode == "remove":
+            desc += f"⚠️ {', '.join(failed)}"
+        else:
+            example = "6/7 6/14" if is_duty else "6/23 6/24"
+            desc += f"\n\n❌ 以下日期格式有誤：{', '.join(failed)}\n格式範例：{example}"
+
+    if not desc.strip():
+        desc = target_prefix + "沒有變更任何設定"
+    return discord.Embed(title=title_map[(kind, mode)], description=desc, color=color)
+
+admin_group = app_commands.Group(name="管理", description="管理員專用指令")
+tree.add_command(admin_group)
+
 # ── 補打卡確認 View（需使用者按鈕確認才打卡）──
 class MakeupPunchView(discord.ui.View):
-    def __init__(self, client_ref, uid, empid, password, action, label, punch_key, punched_today_ref, today_str, retry_key=None):
+    def __init__(self, client_ref, uid, empid, password, action, label, punch_key, punched_today_ref, today_str, retry_key=None, suppress_admin_alerts=False):
         super().__init__(timeout=600)  # 10 分鐘內有效
         self.client_ref = client_ref
         self.uid = uid
@@ -1577,6 +1733,7 @@ class MakeupPunchView(discord.ui.View):
         self.punched_today_ref = punched_today_ref
         self.today_str = today_str
         self.retry_key = retry_key  # 對應 retry_queue 的 retry_key，按下補打後清除重試
+        self.suppress_admin_alerts = suppress_admin_alerts
         self.done = False
 
     @discord.ui.button(label='✅ 確認補打', style=discord.ButtonStyle.success)
@@ -1608,15 +1765,16 @@ class MakeupPunchView(discord.ui.View):
                 content=f"🤖 **補打通知**\n⚠️ {self.label}卡已達 08:00，為避免遲到記錄，不再自動補打。\n請自行確認上班打卡狀況。",
                 view=None
             )
-            await send_admin_alert(
-                client=self.client_ref,
-                uid=self.uid,
-                empid=self.empid,
-                label=self.label,
-                alert_type="makeup_stopped_cutoff",
-                reason="使用者按下補打按鈕時已達 08:00",
-                status="未執行上班補打，已提醒使用者自行確認",
-            )
+            if not self.suppress_admin_alerts:
+                await send_admin_alert(
+                    client=self.client_ref,
+                    uid=self.uid,
+                    empid=self.empid,
+                    label=self.label,
+                    alert_type="makeup_stopped_cutoff",
+                    reason="使用者按下補打按鈕時已達 08:00",
+                    status="未執行上班補打，已提醒使用者自行確認",
+                )
             return
 
         result = await asyncio.get_event_loop().run_in_executor(
@@ -1706,7 +1864,7 @@ async def punch_command(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, view=PunchView(), ephemeral=True)
 
 # ── 綁定帳號（先驗證 e-HR 帳密，不執行打卡）──
-async def new_user_punch_assessment(discord_user, uid_str, empid, password, user_data):
+async def new_user_punch_assessment(discord_user, uid_str, empid, password, user_data, admin_initiated_by=None):
     """
     帳號綁定後立即執行補卡評估，確保當天已過的排程不會漏打。
     在背景以 asyncio.create_task() 執行，不阻塞綁定指令回應。
@@ -1803,6 +1961,7 @@ async def new_user_punch_assessment(discord_user, uid_str, empid, password, user
                             punched_today_ref=load_punched_today(),
                             today_str=today_str,
                             retry_key=rk,
+                            suppress_admin_alerts=bool(admin_initiated_by),
                         )
                     ))
 
@@ -1829,6 +1988,7 @@ async def new_user_punch_assessment(discord_user, uid_str, empid, password, user
                                 punched_today_ref=load_punched_today(),
                                 today_str=today_str,
                                 retry_key=None,
+                                suppress_admin_alerts=bool(admin_initiated_by),
                             )
                         ))
                 else:
@@ -1859,14 +2019,36 @@ async def new_user_punch_assessment(discord_user, uid_str, empid, password, user
                             punched_today_ref=load_punched_today(),
                             today_str=today_str,
                             retry_key=rk,
+                            suppress_admin_alerts=bool(admin_initiated_by),
                         )
                     ))
 
         # ── 發送訊息 ──
+        admin_notice_labels = []
         for msg in msgs:
             await discord_user.send(msg)
+            admin_notice_labels.append("上班")
         for msg, view in views:
             await discord_user.send(msg, view=view)
+            admin_notice_labels.append(view.label)
+
+        if admin_initiated_by and admin_notice_labels:
+            schedule_by_label = {
+                "上班": sch.get("in"),
+                "下班": sch.get("out"),
+                "值班下班": sch.get("dutyout"),
+            }
+            for label in sorted(set(admin_notice_labels)):
+                await send_admin_alert(
+                    client=client,
+                    uid=uid_str,
+                    empid=empid,
+                    label=label,
+                    alert_type="admin_bind_assessment",
+                    reason=f"管理員 <@{admin_initiated_by}> 今日代為綁定後，系統觸發使用者補打/確認提醒",
+                    status="已通知使用者；後續補打或重試不因本次代綁定額外通知管理員",
+                    scheduled_time=schedule_by_label.get(label),
+                )
 
     except Exception as e:
         print(f"補卡評估失敗 {uid_str}：{e}")
@@ -1897,6 +2079,7 @@ class BindModal(discord.ui.Modal, title='綁定打卡帳號'):
             user_data["empid"] = empid
             user_data["password"] = password
             user_data["auto_punch"] = True
+            mark_rebind_confirm_only(user_data)
             save_user_data(interaction.user.id, user_data)
             embed = discord.Embed(
                 title="✅ 綁定成功",
@@ -1909,7 +2092,8 @@ class BindModal(discord.ui.Modal, title='綁定打卡帳號'):
                     f"• 下班卡：17:05~17:40 隨機\n"
                     "• 週六日：不自動打卡\n\n"
                     "如有值班請使用 `/值班新增` 設定\n\n"
-                    "🔍 正在確認今日打卡狀況，稍後若有需要將私訊通知..."
+                    "🔍 正在確認今日打卡狀況。\n"
+                    "⚠️ 本次綁定前已過的排程不會自動補打；如需補打，會私訊請你按鈕確認。"
                 ),
                 color=0x00ff00
             )
@@ -2728,7 +2912,138 @@ async def monthly_summary_command(interaction: discord.Interaction, 員工編號
 # ── 管理員：查看所有綁定使用者狀態 ──
 ADMIN_IDS = {645516761189318707}  # 填入管理員的 Discord User ID
 
-@tree.command(name="管理帳號", description="查看所有綁定使用者的狀態")
+
+class AdminBindModal(discord.ui.Modal, title='管理員代綁定帳號'):
+    empid = discord.ui.TextInput(label='員工編號', placeholder='請輸入員工編號', required=True)
+    password = discord.ui.TextInput(label='密碼', placeholder='請輸入密碼', required=True, style=discord.TextStyle.short)
+
+    def __init__(self, target_user, admin_user_id):
+        super().__init__()
+        self.target_user = target_user
+        self.admin_user_id = admin_user_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if await reject_non_admin(interaction):
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            empid = self.empid.value.strip()
+            password = self.password.value.strip()
+            validation = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: validate_ehr_login(empid, password)
+            )
+            if not validation.get("success"):
+                embed = discord.Embed(
+                    title="❌ 代綁定失敗",
+                    description=f"{validation.get('message')}\n\n未變更 {self.target_user.mention} 的帳號資料。",
+                    color=0xff0000
+                )
+                await interaction.followup.send(embed=embed, ephemeral=True)
+                return
+
+            user_data = get_user_data(self.target_user.id)
+            user_data["empid"] = empid
+            user_data["password"] = password
+            user_data["auto_punch"] = True
+            mark_rebind_confirm_only(user_data)
+            save_user_data(self.target_user.id, user_data)
+
+            asyncio.create_task(new_user_punch_assessment(
+                discord_user=self.target_user,
+                uid_str=str(self.target_user.id),
+                empid=empid,
+                password=password,
+                user_data=user_data,
+                admin_initiated_by=self.admin_user_id,
+            ))
+
+            embed = discord.Embed(
+                title="✅ 代綁定成功",
+                description=(
+                    f"對象：{self.target_user.mention}\n"
+                    f"員工編號：**{empid}**\n\n"
+                    "已開啟自動打卡，並已啟動今日打卡評估。\n"
+                    "本次代綁定前已過的排程不會自動補打；如需補打，會請使用者按鈕確認。"
+                ),
+                color=0x00ff00
+            )
+        except Exception as e:
+            embed = discord.Embed(title="❌ 錯誤", description=str(e), color=0xff0000)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+@admin_group.command(name="綁定", description="管理員代替使用者綁定 e-HR 帳號")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(使用者="要代為綁定的 Discord 使用者")
+async def admin_bind_user(interaction: discord.Interaction, 使用者: discord.User):
+    if await reject_non_admin(interaction):
+        return
+    await interaction.response.send_modal(AdminBindModal(使用者, interaction.user.id))
+
+@admin_group.command(name="解除綁定", description="管理員代替使用者解除 e-HR 帳號綁定")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(使用者="要解除綁定的 Discord 使用者")
+async def admin_unbind_user(interaction: discord.Interaction, 使用者: discord.User):
+    if await reject_non_admin(interaction):
+        return
+    user_data = get_user_data(使用者.id)
+    user_data["empid"] = None
+    user_data["password"] = None
+    user_data["auto_punch"] = False
+    save_user_data(使用者.id, user_data)
+    embed = discord.Embed(
+        title="✅ 已解除綁定",
+        description=f"對象：{使用者.mention}\n帳號已解除，自動打卡停止。",
+        color=0xffaa00
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+async def admin_update_dates(interaction, target_user, raw_dates, kind, mode):
+    if await reject_non_admin(interaction):
+        return
+    field = "duty_days" if kind == "duty" else "leave_dates"
+    user_data = get_user_data(target_user.id)
+    added, removed, failed = update_date_setting(user_data, field, raw_dates, mode)
+    save_user_data(target_user.id, user_data)
+    embed = build_date_setting_embed(kind, mode, added, removed, failed, target_user=target_user)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@admin_group.command(name="值班設定", description="管理員重設指定使用者整月值班日")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(使用者="要設定的 Discord 使用者", 日期="輸入所有值班日期，用空格分隔，例如：6/7 6/14")
+async def admin_set_duty(interaction: discord.Interaction, 使用者: discord.User, 日期: str):
+    await admin_update_dates(interaction, 使用者, 日期, "duty", "reset")
+
+@admin_group.command(name="值班新增", description="管理員新增指定使用者值班日")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(使用者="要設定的 Discord 使用者", 日期="輸入值班日期，用空格分隔，例如：6/21 6/28")
+async def admin_add_duty(interaction: discord.Interaction, 使用者: discord.User, 日期: str):
+    await admin_update_dates(interaction, 使用者, 日期, "duty", "add")
+
+@admin_group.command(name="值班取消", description="管理員取消指定使用者值班日")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(使用者="要設定的 Discord 使用者", 日期="輸入要取消的值班日期，用空格分隔")
+async def admin_cancel_duty(interaction: discord.Interaction, 使用者: discord.User, 日期: str):
+    await admin_update_dates(interaction, 使用者, 日期, "duty", "remove")
+
+@admin_group.command(name="休假設定", description="管理員重設指定使用者整月休假日")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(使用者="要設定的 Discord 使用者", 日期="輸入所有休假日期，用空格分隔，例如：6/23 6/24")
+async def admin_set_leave(interaction: discord.Interaction, 使用者: discord.User, 日期: str):
+    await admin_update_dates(interaction, 使用者, 日期, "leave", "reset")
+
+@admin_group.command(name="休假新增", description="管理員新增指定使用者休假日")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(使用者="要設定的 Discord 使用者", 日期="輸入休假日期，用空格分隔，例如：6/23 6/24")
+async def admin_add_leave(interaction: discord.Interaction, 使用者: discord.User, 日期: str):
+    await admin_update_dates(interaction, 使用者, 日期, "leave", "add")
+
+@admin_group.command(name="休假取消", description="管理員取消指定使用者休假日")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(使用者="要設定的 Discord 使用者", 日期="輸入要取消的休假日期，用空格分隔")
+async def admin_cancel_leave(interaction: discord.Interaction, 使用者: discord.User, 日期: str):
+    await admin_update_dates(interaction, 使用者, 日期, "leave", "remove")
+
+@admin_group.command(name="帳號", description="查看所有綁定使用者的狀態")
 @app_commands.default_permissions(administrator=True)
 async def admin_query(interaction: discord.Interaction):
     if interaction.user.id not in ADMIN_IDS:
@@ -2848,7 +3163,7 @@ async def admin_query(interaction: discord.Interaction):
     embed.set_footer(text=f"查詢時間：{datetime.now().strftime('%H:%M')}")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@tree.command(name="管理今日打卡驗證", description="管理員查詢所有綁定使用者今日 e-HR 實際刷卡紀錄")
+@admin_group.command(name="今日打卡驗證", description="管理員查詢所有綁定使用者今日 e-HR 實際刷卡紀錄")
 @app_commands.default_permissions(administrator=True)
 async def admin_verify_today(interaction: discord.Interaction):
     if interaction.user.id not in ADMIN_IDS:
@@ -3099,6 +3414,16 @@ async def help_command(interaction: discord.Interaction):
     embed.add_field(
         name="👤 帳號設定",
         value="`/帳號綁定` — 綁定員工編號+密碼，開啟自動打卡\n　　　　　　綁定後自動評估當天打卡狀況：\n　　　　　　• 排程時間已過且 e-HR 無記錄 → 私訊補打按鈕\n　　　　　　• 超過 08:00 未打上班卡 → 私訊告知（不補打，避免遲到）\n　　　　　　• 排程時間未到 → 等待自動打卡，不另通知\n`/帳號解除` — 取消綁定，停止自動打卡",
+        inline=False
+    )
+    embed.add_field(
+        name="🛠️ 管理員指令",
+        value=(
+            "`/管理 帳號` — 查看所有綁定使用者狀態\n"
+            "`/管理 今日打卡驗證` — 查詢所有綁定使用者今日 e-HR 實際刷卡紀錄\n"
+            "`/管理 綁定`、`/管理 解除綁定` — 代替指定使用者管理帳號\n"
+            "`/管理 值班設定/新增/取消`、`/管理 休假設定/新增/取消` — 代替指定使用者調整日期"
+        ),
         inline=False
     )
     embed.add_field(

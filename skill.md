@@ -1,146 +1,124 @@
 ---
 name: punch-procedure
-description: punch_relay Discord 打卡機器人的 repository-local 操作 skill。當需要診斷或修改打卡資格、重試、補打按鈕、值班/請假/取消排程、e-HR 比對、管理員告警，或判斷 bot 是否應該打卡、重試、通知、停止時使用。
+description: Repository-local operating rules for maintaining and deploying the punch_relay Discord bot.
 ---
 
-# 打卡程序 Skill
+# Punch Relay Skill
 
-## 適用範圍
+Use this skill whenever working on the `punch_relay` bot, its Windows service scripts, deployment files, GitHub sync, or runtime verification.
 
-這個檔案用來判斷本 repository 的打卡行為。開發流程、驗證、重啟與 GitHub 上傳規則請看 `agent.md`。
+## Core Rule
 
-## 狀態檔
+After any change under a punch relay project folder, sync the intended repository changes to:
 
-- `schedule_today.json`：今天的隨機打卡時間。同一天已存在的排程不可重新隨機。
-- `punched_today.json`：本機成功打卡 key。只有成功後才能寫入。
-- `admin_alerts_today.json`：管理員告警去重 key。
-- `punch_data.json`：使用者綁定、值班日、請假日、取消日期與通知設定。
+```text
+https://github.com/jeff210597/punch_relay
+```
 
-## 打卡類型與 Key
+Do not leave deployable code, service scripts, docs, or bundled tool changes only on the host. Runtime state and secrets must stay local.
 
-- 上班：`action="in"`，key `{uid}-in-{YYYY-MM-DD}`
-- 下班：`action="out"`，key `{uid}-out-{YYYY-MM-DD}`
-- 值班隔日下班：`action="out"`，key `{uid}-dutyout-{YYYY-MM-DD}`
+## Never Commit
 
-`dutyout` 呼叫 e-HR 時是下班 `out` 打卡，但本機必須使用獨立的 `dutyout` key。
+Never stage or upload:
 
-## 打卡資格
+- `.env`
+- `punch_data.json`
+- `punched_today.json`
+- `schedule_today.json`
+- `admin_alerts_today.json`
+- `bot.log`
+- `synced.flag`
+- `*.bak`
+- `__pycache__/`
+- `.codex-remote-attachments/`
 
-自動打卡前必須先確認：
+Before any commit or GitHub API update, scan for real secrets:
 
-- 必須有 `empid`、`password`，且 `auto_punch=True`。
-- 若日期在 `cancel_dates`，跳過所有自動打卡行為；目前沒有其他特殊覆蓋規則。
-- 請假日跳過一般打卡。
-- 週末跳過一般打卡，除非使用者今天值班或昨天值班。
-- 值班日：打上班卡，不打一般下班卡。
-- 值班隔日：跳過上班卡，到了時間打 `dutyout`。
-- 即使值班隔日遇到請假或週末，仍可能需要打 `dutyout`。
+```powershell
+rg -n "DISCORD_TOKEN|EHR_BASE|pwd|password|token|密碼" README.md docs bot_all_in_one.py restart_bot_admin.ps1 restart_bot_resync_admin.ps1 .env.example agent.md skill.md
+```
 
-## 到期處理優先順序
+Variable names and placeholders are allowed. Real Discord tokens, e-HR URLs, passwords, cookies, and user data are not allowed.
 
-同一輪如果有多個 key 到期，處理順序如下：
+## Required Validation
 
-1. `dutyout`
-2. 一般 `out`
-3. `in`
+For code changes, run:
 
-這樣可以避免早上漏掉的舊 key 擋住下午下班或值班隔日下班。
+```powershell
+python -m py_compile bot_all_in_one.py
+```
 
-## 成功規則
+For deployment/script changes, also verify:
 
-自動打卡成功時：
+```powershell
+Test-Path tools\nssm\win32\nssm.exe
+Test-Path tools\nssm\win64\nssm.exe
+rg -n "C:\\punch_relay|C:\\Users\\7b\\Documents\\punch_relay" README.md docs agent.md skill.md bot_all_in_one.py start.bat restart_bot_admin.ps1 restart_bot_resync_admin.ps1 install_nssm_service_admin.ps1
+```
 
-- 通知使用者。
-- 將正確 key 寫入 `punched_today.json`。
-- 不通知管理員告警。
-- 不保留該 key 的 retry queue。
+The path scan should return no fixed project-root dependencies. Scripts should use their own location as the project root.
 
-如果 e-HR 確認資料延遲，本機仍可先記錄成功。後續最終比對若發現 e-HR 仍缺紀錄，再另外告警。
+## GitHub Sync Procedure
 
-## 失敗、重試與補打
+1. Inspect local changes:
 
-自動打卡失敗時：
+```powershell
+git status --short --branch
+git diff
+```
 
-- 通知使用者。
-- 發送管理員告警。
-- 若規則允許，排入 2 分鐘後自動重試。
-- 最多自動重試 3 次。
-- 若規則允許，發送補打按鈕。
+2. Stage only intended repository files. Prefer explicit paths. Do not use broad staging when runtime files are present.
 
-上班 `in` 規則：
+3. Commit with a clear message.
 
-- 只能在 08:00 前自動重試與補打。
-- 08:00 或之後，不能呼叫 `punch_clock(..., "in")`。
-- 如果已排入的上班重試到達執行時間時已經 08:00，停止重試並告警。
-- 如果舊的上班補打按鈕在 08:00 或之後被按下，要拒絕並告警。
+4. Push to `main`:
 
-下班 `out` 與值班隔日下班 `dutyout` 規則：
+```powershell
+git push origin main
+```
 
-- 2 分鐘後重試，最多 3 次。
-- 補打按鈕有效 10 分鐘。
-- 最終重試失敗時通知管理員，並可再次提醒使用者補打。
+## Stable GitHub Authentication Policy
 
-## 補打按鈕
+Do not repeatedly retry `git push` when authentication is missing. It wastes time and tokens.
 
-按鈕有效時間：10 分鐘。
+Use this sequence:
 
-按下確認時：
+1. Try one normal `git push origin main`.
+2. If it hangs or times out, run one non-interactive diagnostic:
 
-1. 重新讀取 `punched_today.json`。
-2. 如果 key 已存在，不要再次打卡。
-3. 如果 action 是 `in`，且目前時間是 08:00 或之後，停止。
-4. 否則呼叫 `punch_clock()`。
-5. 成功後寫入 key，並移除對應 retry entry。
-6. 失敗時告知使用者需手動處理。
+```powershell
+$env:GIT_TERMINAL_PROMPT='0'
+git -c credential.helper= push origin main
+```
 
-按下取消時：
+3. If the diagnostic says it cannot read the GitHub username, stop retrying local push.
+4. Prefer a stable credential setup before continuing:
 
-- 不打卡。
-- 告知使用者需手動處理。
+```powershell
+git config --global credential.helper manager
+git push origin main
+```
 
-逾時時：
+Complete the GitHub browser/device login once when prompted. After that, future pushes should reuse the stored credential.
 
-- 告知使用者補打請求已過期。
+5. If the host cannot complete GitHub credential setup and GitHub connector tools are available, use the connector/API path for small text-only updates. For large or many-file syncs, ask for one-time GitHub authentication rather than manually reconstructing large files through the API.
 
-## e-HR 比對
+6. Never force-push, reset, or rebase unless explicitly requested.
 
-18:00 一般工作日：
+## Deployment Expectations
 
-- 檢查一般 `out`。
-- 如果 e-HR 有 `clock_out` 或可推定為有效下班時間，保持安靜。
-- 如果缺少紀錄，通知使用者、發送補打按鈕，並通知管理員。
+The repository should be enough to rebuild a new host:
 
-09:00 值班隔日：
+1. Clone the repo.
+2. Install Python and `pip install -r requirements.txt`.
+3. Copy `.env.example` to `.env` and fill secrets locally.
+4. Run `python -m py_compile bot_all_in_one.py`.
+5. Run `install_nssm_service_admin.ps1` as Administrator.
+6. Use `restart_bot_resync_admin.ps1` when slash commands changed.
 
-- 檢查 `dutyout`。
-- 如果 e-HR 有 `clock_out` 或可推定為有效值班隔日下班時間，保持安靜。
-- 如果缺少紀錄，通知使用者、發送補打按鈕，並通知管理員。
+The repo includes both NSSM binaries:
 
-預期本來就應該跳過的日期，不要視為失敗。
+- `tools/nssm/win32/nssm.exe`
+- `tools/nssm/win64/nssm.exe`
 
-## 管理員告警
-
-以下情況要發送管理員告警：
-
-- 自動打卡失敗。
-- 上班 `in` 重試因 08:00 截止而停止。
-- 重試 3 次後仍失敗。
-- e-HR 最終比對仍缺打卡紀錄。
-- 上班 `in` 補打按鈕在 08:00 或之後被按下。
-
-以下情況不要告警：
-
-- 打卡成功。
-- 符合規則的預期跳過。
-- e-HR 比對確認已有紀錄。
-
-告警目的地：
-
-- 優先使用 `ADMIN_ALERT_CHANNEL_ID=1514929880448630904` (`admin-alert`)。
-- 只有在頻道無法使用時，才 fallback 到 `ADMIN_IDS` 私訊。
-
-告警內容絕不能包含密碼、token、cookie、原始 payload 或完整敏感 URL。
-
-## 手動打卡例外
-
-明確使用 `/打卡` 指令屬於手動操作。08:00 截止規則適用於自動重試與補打按鈕，不套用到使用者明確執行的手動指令。
+Do not require a fixed install directory such as `C:\punch_relay`.
