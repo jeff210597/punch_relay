@@ -1,6 +1,7 @@
 # Runtime logs
 *.log
 bot.log
+github_sync.log
 
 # Local state and sensitive user data
 punch_data.json

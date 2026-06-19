@@ -1,22 +1,24 @@
 # Punch Relay Discord Bot
 
-這個 repository 包含 Discord 打卡機器人的程式、Windows 服務安裝腳本、NSSM 執行檔與部署文件。新主機只要 clone GitHub repo、安裝 Python 套件、建立 `.env`，即可重現目前的運行環境。
+This repository contains the Discord punch bot, Windows service scripts, bundled NSSM binaries, deployment notes, and GitHub auto-sync scripts. A new Windows host should be able to reproduce the bot by cloning this repository, installing Python dependencies, creating a local `.env`, and installing the services.
 
-## 專案檔案
+## Files
 
-- `bot_all_in_one.py`：Discord bot 主程式。
-- `requirements.txt`：Python 套件清單。
-- `.env.example`：本機 `.env` 範本，請複製後填入真實 token、頻道 ID 與 e-HR 網址。
-- `tools/nssm/win32/nssm.exe`、`tools/nssm/win64/nssm.exe`：已隨 repo 附上的 NSSM，依 Windows 架構自動選用。
-- `install_nssm_service_admin.ps1`：以系統管理員權限安裝或更新 `PunchBotService`。
-- `restart_bot_admin.ps1`：重啟 bot，不強制重新同步 slash command。
-- `restart_bot_resync_admin.ps1`：刪除 `synced.flag` 後重啟 bot，讓 slash command 重新同步。
-- `start.bat`：互動式管理員啟動器，可選擇是否重新同步 slash command。
-- `agent.md`、`skill.md`、`docs/`：Codex 與維護文件。
+- `bot_all_in_one.py`: main Discord bot.
+- `requirements.txt`: Python dependencies.
+- `.env.example`: local environment template. Copy it to `.env` and fill real values locally.
+- `tools/nssm/win32/nssm.exe` and `tools/nssm/win64/nssm.exe`: bundled NSSM binaries.
+- `install_nssm_service_admin.ps1`: installs or updates `PunchBotService`.
+- `restart_bot_admin.ps1`: restarts the bot service.
+- `restart_bot_resync_admin.ps1`: removes `synced.flag` and restarts the bot so slash commands sync again.
+- `sync_to_github.ps1`: commits and pushes safe repository changes.
+- `watch_github_sync.ps1`: watches the folder and runs the sync script after changes settle.
+- `install_github_sync_watcher_admin.ps1`: installs `PunchRelayGitSync`, the watcher Windows service.
+- `agent.md`, `skill.md`, and `docs/`: maintenance notes.
 
-## 不上傳 GitHub 的本機資料
+## Local Files That Must Not Be Uploaded
 
-以下檔案包含機密、個人設定或執行狀態，會被 `.gitignore` 排除：
+The following files contain secrets, personal data, runtime state, or logs and are ignored by Git:
 
 - `.env`
 - `punch_data.json`
@@ -25,94 +27,103 @@
 - `admin_alerts_today.json`
 - `synced.flag`
 - `bot.log`
+- `github_sync.log`
 - `*.bak`
 - `__pycache__/`
 
-不要把 Discord token、e-HR 密碼、cookie、個人打卡資料或 log 上傳到 GitHub。
+Never upload Discord tokens, GitHub tokens, e-HR passwords, cookies, personal punch data, or logs.
 
-## 新主機部署
+## New Host Setup
 
-1. Clone repo 到任意資料夾，例如：
+1. Clone the repository:
 
 ```powershell
 git clone https://github.com/jeff210597/punch_relay.git
 cd punch_relay
 ```
 
-2. 安裝 Python 3.11 以上，並安裝套件：
+2. Install Python dependencies:
 
 ```powershell
 python -m pip install -r requirements.txt
 ```
 
-3. 建立 `.env`：
+3. Create `.env`:
 
 ```powershell
 Copy-Item .env.example .env
 notepad .env
 ```
 
-填入：
+Fill the local values:
 
 ```text
-DISCORD_TOKEN=你的 Discord bot token
-NOTIFY_CHANNEL_ID=通知頻道 ID
-EHR_BASE=http://你的-ehr-host/
-ADMIN_ALERT_CHANNEL_ID=管理員告警頻道 ID
+DISCORD_TOKEN=your Discord bot token
+NOTIFY_CHANNEL_ID=Discord notify channel ID
+ADMIN_ALERT_CHANNEL_ID=Discord admin alert channel ID
+EHR_BASE=http://your-ehr-host
 ```
 
-`ADMIN_ALERT_CHANNEL_ID` 可留空或使用預設值；若頻道無法送出，程式會 fallback 到 `ADMIN_IDS`。
+Use `EHR_BASE` without a trailing slash.
 
-4. 語法檢查：
+4. Validate syntax:
 
 ```powershell
 python -m py_compile bot_all_in_one.py
 ```
 
-5. 以系統管理員權限安裝或更新 Windows 服務：
+5. Install or update the bot service from an Administrator PowerShell:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install_nssm_service_admin.ps1
 ```
 
-這個腳本會使用腳本所在資料夾作為服務工作目錄，不要求 repo 一定放在特定路徑。
-
-6. 需要重新同步 slash command 時：
+6. Restart and force slash command sync after command changes:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\restart_bot_resync_admin.ps1
 ```
 
-一般重啟：
+For a normal restart:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\restart_bot_admin.ps1
 ```
 
-## 驗證服務
+## GitHub Auto Sync
+
+The PAT only proves push permission. Folder change detection is handled by a separate watcher service.
+
+1. Make sure GitHub HTTPS authentication works once on the host. Prefer Git Credential Manager or a secure PAT credential. Do not store the PAT inside this repository.
+
+2. Test a safe sync manually:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\sync_to_github.ps1 -DryRun
+```
+
+3. Install the watcher from an Administrator PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install_github_sync_watcher_admin.ps1
+```
+
+The service name is `PunchRelayGitSync`. It watches the repository folder and runs `sync_to_github.ps1` after changes settle for 45 seconds.
+
+Check it with:
+
+```powershell
+Get-Service PunchRelayGitSync
+Get-Content .\github_sync.log -Tail 50
+```
+
+## Verification
 
 ```powershell
 Get-Service PunchBotService
 Get-Content .\bot.log -Tail 50 -Encoding UTF8
-```
-
-服務應為 `Running`。若剛新增或修改 slash command，請使用 `restart_bot_resync_admin.ps1` 重新啟動。
-
-## NSSM 架構選擇
-
-`start.bat` 與 `install_nssm_service_admin.ps1` 都會依目前 Windows 架構選擇 NSSM：
-
-- 64-bit Windows：`tools\nssm\win64\nssm.exe`
-- 32-bit Windows：`tools\nssm\win32\nssm.exe`
-
-## 維護流程
-
-修改程式後至少執行：
-
-```powershell
 python -m py_compile bot_all_in_one.py
 git status
-git diff
 ```
 
-提交前再次確認沒有 staged `.env`、log、json 狀態檔、token 或密碼。
+Before each commit or push, confirm no `.env`, runtime JSON, logs, tokens, passwords, or backup files are staged.
