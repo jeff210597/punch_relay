@@ -106,6 +106,8 @@ watcher 會執行 `watch_github_sync.ps1`，忽略本機 runtime 與密鑰檔案
 
 GitHub 驗證缺失時，不要一直重試 `git push`，這會浪費時間與 token。
 
+曾發生的卡住原因：`sync_to_github.ps1` 已經完成本機 commit，但 `git push` 進入 GitHub HTTPS credential helper/互動驗證流程，導致沒有 `push complete`，本機狀態變成 `main...origin/main [ahead 1]`，GitHub 看不到更新。
+
 使用這個順序：
 
 1. 先嘗試一次正常 push：
@@ -114,16 +116,26 @@ GitHub 驗證缺失時，不要一直重試 `git push`，這會浪費時間與 t
 git push origin main
 ```
 
-2. 如果卡住或 timeout，執行一次非互動診斷：
+2. 如果卡住或 timeout，先檢查狀態與 log：
+
+```powershell
+git status --short --branch
+git log --oneline --decorate -5
+Get-Content .\github_sync.log -Tail 80
+```
+
+如果狀態顯示 `[ahead 1]` 且 log 停在 `staged files:` 或 commit 後沒有 `push complete`，代表本機已 commit、遠端未收到。
+
+3. 執行一次非互動診斷，避免再次觸發 credential helper 視窗或卡住：
 
 ```powershell
 $env:GIT_TERMINAL_PROMPT='0'
 git -c credential.helper= push origin main
 ```
 
-3. 如果診斷訊息表示無法讀取 GitHub username，就停止重試本機 push。
+4. 如果診斷訊息表示無法讀取 GitHub username，就停止重試本機 push。穩定方案是讓服務或目前 shell 有 `GITHUB_PAT`，再執行同步；沒有 PAT 時，`sync_to_github.ps1` 應使用非互動 push 快速失敗，不應等待 GitHub credential helper。
 
-4. 繼續前，優先建立穩定 credential：
+5. 若要用本機 Git 長期 push，繼續前建立穩定 credential：
 
 ```powershell
 git config --global credential.helper manager
@@ -132,11 +144,11 @@ git push origin main
 
 出現提示時完成一次 GitHub browser/device login。之後的 push 應會重用已儲存 credential。
 
-5. 如果使用者提供 GitHub PAT，只能用於 GitHub credential setup、單次 env-only push，或本機 `PunchRelayGitSync` 服務環境。不要把 PAT 寫進 repository 檔案、log、remote、script 或文件。
+6. 如果使用者提供 GitHub PAT，只能用於 GitHub credential setup、單次 env-only push，或本機 `PunchRelayGitSync` 服務環境。不要把 PAT 寫進 repository 檔案、log、remote、script 或文件。
 
-6. 如果主機無法完成 GitHub credential setup，且 GitHub connector tools 可用，少量文字更新可改用 connector/API 路徑。大量或多檔同步時，應要求一次性 GitHub 驗證，不要手動透過 API 重建大量檔案。
+7. 如果主機無法完成 GitHub credential setup，且 GitHub connector tools 可用，少量文字更新可改用 connector/API 路徑。API 更新成功後，執行 `git fetch origin`，確認 GitHub 已更新。若本機之前已有未推上的重複 commit，且使用者同意直接對齊，才能執行 `git reset --hard origin/main`。
 
-7. 除非使用者明確要求，不要 force-push、reset 或 rebase。
+8. 除非使用者明確要求，不要 force-push、reset 或 rebase。
 
 ## 部署預期
 
