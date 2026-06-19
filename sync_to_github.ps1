@@ -60,10 +60,15 @@ function Invoke-GitPush {
         & $GitExe -c http.sslBackend=openssl -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $basic" push origin main
     }
     else {
-        & $GitExe -c http.sslBackend=openssl push origin main
+        Write-SyncLog "GITHUB_PAT is not set; running non-interactive push without credential helpers"
+        & $GitExe -c http.sslBackend=openssl -c credential.helper= push origin main
     }
 
     if ($LASTEXITCODE -ne 0) {
+        if (-not $env:GITHUB_PAT) {
+            throw "git push origin main failed with exit code $LASTEXITCODE. No GITHUB_PAT was set, so the script refused interactive credential prompts. Install PunchRelayGitSync with -GitHubPat or complete Git credential setup manually before retrying."
+        }
+
         throw "git push origin main failed with exit code $LASTEXITCODE"
     }
 }
