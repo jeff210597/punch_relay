@@ -135,7 +135,56 @@ git -c credential.helper= push origin main
 
 4. 如果診斷訊息表示無法讀取 GitHub username，就停止重試本機 push。穩定方案是讓服務或目前 shell 有 `GITHUB_PAT`，再執行同步；沒有 PAT 時，`sync_to_github.ps1` 應使用非互動 push 快速失敗，不應等待 GitHub credential helper。
 
-5. 若要用本機 Git 長期 push，繼續前建立穩定 credential：
+5. 如果錯誤顯示 GitHub 連線嘗試走到 `127.0.0.1`，先檢查 proxy 環境：
+
+```powershell
+cmd /c set | findstr /i proxy
+```
+
+曾發生 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY`、`GIT_HTTP_PROXY`、`GIT_HTTPS_PROXY` 都指向 `http://127.0.0.1:9`，造成 `Failed to connect to github.com port 443 via 127.0.0.1`。單次 push 前可只在目前 shell 清掉，不要改系統設定：
+
+```powershell
+$env:HTTP_PROXY=''
+$env:HTTPS_PROXY=''
+$env:ALL_PROXY=''
+$env:GIT_HTTP_PROXY=''
+$env:GIT_HTTPS_PROXY=''
+```
+
+6. 如果多次 timeout 後看到很多 `git`、`git-remote-https`、`git-credential-manager`、`git-credential-helper-selector`、`sh` 或 `bash` 殘留程序，先停掉上一輪卡住的 PortableGit/GCM 程序，再重新診斷：
+
+```powershell
+Get-Process | Where-Object { $_.ProcessName -match 'git|credential|bash|sh' } | Select-Object Id,ProcessName,Path
+```
+
+只結束屬於本專案 `PortableGit` 的殘留程序；不要碰防毒、桌面 shell 或其他應用。若 `Stop-Process` 被拒絕，可用 PID 執行 `taskkill /F /PID <pid>`。
+
+7. 如果本機沒有可用 GitHub credential，但 `PunchRelayGitSync` 服務已安裝，服務設定可能已在 NSSM `AppEnvironmentExtra` 內保存 `GITHUB_PAT`。可以從 registry 讀入記憶體做單次 push，但絕對不要把 PAT 印出、寫入檔案、commit message、remote URL 或 log：
+
+```powershell
+$env:HTTP_PROXY=''
+$env:HTTPS_PROXY=''
+$env:ALL_PROXY=''
+$env:GIT_HTTP_PROXY=''
+$env:GIT_HTTPS_PROXY=''
+$env:GIT_TERMINAL_PROMPT='0'
+$svc = Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\PunchRelayGitSync\Parameters'
+$patLine = @($svc.AppEnvironmentExtra) | Where-Object { $_ -like 'GITHUB_PAT=*' } | Select-Object -First 1
+if (-not $patLine) { throw 'GITHUB_PAT not found in PunchRelayGitSync service configuration' }
+$pat = $patLine.Substring('GITHUB_PAT='.Length)
+$basic = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("x-access-token:$pat"))
+git -c http.sslBackend=openssl -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $basic" push origin main
+```
+
+推送後確認本機狀態回到：
+
+```text
+## main...origin/main
+```
+
+也要用 GitHub commit URL、GitHub connector，或其他遠端讀回方式確認 GitHub 真的收到，不要只看本機 commit。
+
+8. 若要用本機 Git 長期 push，繼續前建立穩定 credential：
 
 ```powershell
 git config --global credential.helper manager
@@ -144,11 +193,11 @@ git push origin main
 
 出現提示時完成一次 GitHub browser/device login。之後的 push 應會重用已儲存 credential。
 
-6. 如果使用者提供 GitHub PAT，只能用於 GitHub credential setup、單次 env-only push，或本機 `PunchRelayGitSync` 服務環境。不要把 PAT 寫進 repository 檔案、log、remote、script 或文件。
+9. 如果使用者提供 GitHub PAT，只能用於 GitHub credential setup、單次 env-only push，或本機 `PunchRelayGitSync` 服務環境。不要把 PAT 寫進 repository 檔案、log、remote、script 或文件。
 
-7. 如果主機無法完成 GitHub credential setup，且 GitHub connector tools 可用，少量文字更新可改用 connector/API 路徑。API 更新成功後，執行 `git fetch origin`，確認 GitHub 已更新。若本機之前已有未推上的重複 commit，且使用者同意直接對齊，才能執行 `git reset --hard origin/main`。
+10. 如果主機無法完成 GitHub credential setup，且 GitHub connector tools 可用，少量文字更新可改用 connector/API 路徑。API 更新成功後，執行 `git fetch origin`，確認 GitHub 已更新。若本機之前已有未推上的重複 commit，且使用者同意直接對齊，才能執行 `git reset --hard origin/main`。
 
-8. 除非使用者明確要求，不要 force-push、reset 或 rebase。
+11. 除非使用者明確要求，不要 force-push、reset 或 rebase。
 
 ## 部署預期
 
