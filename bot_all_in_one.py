@@ -1717,6 +1717,7 @@ def build_date_setting_embed(kind, mode, added, removed, failed, target_user=Non
     return discord.Embed(title=title_map[(kind, mode)], description=desc, color=color)
 
 admin_group = app_commands.Group(name="管理", description="管理員專用指令")
+admin_group.default_permissions = discord.Permissions(administrator=True)
 tree.add_command(admin_group)
 
 # ── 補打卡確認 View（需使用者按鈕確認才打卡）──
@@ -3416,16 +3417,17 @@ async def help_command(interaction: discord.Interaction):
         value="`/帳號綁定` — 綁定員工編號+密碼，開啟自動打卡\n　　　　　　綁定後自動評估當天打卡狀況：\n　　　　　　• 排程時間已過且 e-HR 無記錄 → 私訊補打按鈕\n　　　　　　• 超過 08:00 未打上班卡 → 私訊告知（不補打，避免遲到）\n　　　　　　• 排程時間未到 → 等待自動打卡，不另通知\n`/帳號解除` — 取消綁定，停止自動打卡",
         inline=False
     )
-    embed.add_field(
-        name="🛠️ 管理員指令",
-        value=(
-            "`/管理 帳號` — 查看所有綁定使用者狀態\n"
-            "`/管理 今日打卡驗證` — 查詢所有綁定使用者今日 e-HR 實際刷卡紀錄\n"
-            "`/管理 綁定`、`/管理 解除綁定` — 代替指定使用者管理帳號\n"
-            "`/管理 值班設定/新增/取消`、`/管理 休假設定/新增/取消` — 代替指定使用者調整日期"
-        ),
-        inline=False
-    )
+    if is_admin_user(interaction.user.id):
+        embed.add_field(
+            name="🛠️ 管理員指令",
+            value=(
+                "`/管理 帳號` — 查看所有綁定使用者狀態\n"
+                "`/管理 今日打卡驗證` — 查詢所有綁定使用者今日 e-HR 實際刷卡紀錄\n"
+                "`/管理 綁定`、`/管理 解除綁定` — 代替指定使用者管理帳號\n"
+                "`/管理 值班設定/新增/取消`、`/管理 休假設定/新增/取消` — 代替指定使用者調整日期"
+            ),
+            inline=False
+        )
     embed.add_field(
         name="📅 值班設定",
         value=(
