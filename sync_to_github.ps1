@@ -57,7 +57,7 @@ function Find-Git {
 
 function Invoke-Git {
     param([Parameter(ValueFromRemainingArguments = $true)][string[]]$GitArgs)
-    & $GitExe -c http.sslBackend=openssl @GitArgs
+    & $GitExe -c "safe.directory=$Root" -c http.sslBackend=openssl @GitArgs
     if ($LASTEXITCODE -ne 0) {
         throw "git $($GitArgs -join ' ') failed with exit code $LASTEXITCODE"
     }
@@ -68,11 +68,11 @@ function Invoke-GitRemote {
     if ($env:GITHUB_PAT) {
         $pair = "x-access-token:$($env:GITHUB_PAT)"
         $basic = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($pair))
-        & $GitExe -c http.sslBackend=openssl -c credential.helper= -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $basic" @GitArgs
+        & $GitExe -c "safe.directory=$Root" -c http.sslBackend=openssl -c credential.helper= -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $basic" @GitArgs
     }
     else {
         Write-SyncLog "GITHUB_PAT is not set; running non-interactive remote command without credential helpers"
-        & $GitExe -c http.sslBackend=openssl -c credential.helper= @GitArgs
+        & $GitExe -c "safe.directory=$Root" -c http.sslBackend=openssl -c credential.helper= @GitArgs
     }
 
     if ($LASTEXITCODE -ne 0) {
@@ -100,7 +100,7 @@ function Assert-NoForbiddenStagedFiles {
         '^\.codex-remote-attachments/'
     )
 
-    $staged = & $GitExe diff --cached --name-only
+    $staged = & $GitExe -c "safe.directory=$Root" diff --cached --name-only
     foreach ($file in $staged) {
         foreach ($pattern in $forbidden) {
             if ($file -match $pattern) {
@@ -112,7 +112,7 @@ function Assert-NoForbiddenStagedFiles {
 }
 
 function Assert-NoObviousSecrets {
-    $diff = & $GitExe diff --cached --unified=0
+    $diff = & $GitExe -c "safe.directory=$Root" diff --cached --unified=0
     $scanText = ($diff -split "`n" | Where-Object {
         $_.StartsWith("+") -and
         -not $_.StartsWith("+++") -and
@@ -145,18 +145,18 @@ try {
 
     Write-SyncLog "sync check started at $Root"
 
-    $inside = & $GitExe rev-parse --is-inside-work-tree
+    $inside = & $GitExe -c "safe.directory=$Root" rev-parse --is-inside-work-tree
     if ($LASTEXITCODE -ne 0 -or $inside.Trim() -ne "true") {
         throw "$Root is not a git repository."
     }
 
-    $branch = (& $GitExe branch --show-current).Trim()
+    $branch = (& $GitExe -c "safe.directory=$Root" branch --show-current).Trim()
     if ($branch -ne "main") {
         throw "Refused to auto-sync branch '$branch'. Expected 'main'."
     }
 
     Invoke-GitRemote fetch origin main
-    $counts = ((& $GitExe rev-list --left-right --count main...origin/main).Trim() -split '\s+')
+    $counts = ((& $GitExe -c "safe.directory=$Root" rev-list --left-right --count main...origin/main).Trim() -split '\s+')
     if ($LASTEXITCODE -ne 0 -or $counts.Count -lt 2) {
         throw "Unable to compare main with origin/main."
     }
@@ -166,13 +166,13 @@ try {
         throw "Refused to auto-sync because local main is behind origin/main by $behind commit(s). Update the checkout before retrying."
     }
 
-    $porcelain = & $GitExe status --porcelain
+    $porcelain = & $GitExe -c "safe.directory=$Root" status --porcelain
     if ($porcelain) {
         Invoke-Git add -A -- .
         Assert-NoForbiddenStagedFiles
         Assert-NoObviousSecrets
 
-        $stagedNames = & $GitExe diff --cached --name-only
+        $stagedNames = & $GitExe -c "safe.directory=$Root" diff --cached --name-only
         if (-not $stagedNames) {
             Write-SyncLog "changes exist, but nothing safe is staged"
             exit 0
@@ -203,8 +203,8 @@ try {
 
     Invoke-GitRemote push origin main
     Invoke-GitRemote fetch origin main
-    $localSha = (& $GitExe rev-parse HEAD).Trim()
-    $remoteSha = (& $GitExe rev-parse origin/main).Trim()
+    $localSha = (& $GitExe -c "safe.directory=$Root" rev-parse HEAD).Trim()
+    $remoteSha = (& $GitExe -c "safe.directory=$Root" rev-parse origin/main).Trim()
     if ($localSha -ne $remoteSha) {
         throw "Remote verification failed: local HEAD does not match origin/main."
     }

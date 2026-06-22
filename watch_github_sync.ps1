@@ -44,7 +44,7 @@ function Find-Git {
 }
 
 function Get-RepoSignature {
-    $status = & $GitExe status --porcelain=v1 --untracked-files=normal
+    $status = & $GitExe -c "safe.directory=$Root" status --porcelain=v1 --untracked-files=normal
     if ($LASTEXITCODE -ne 0) {
         throw "git status failed with exit code $LASTEXITCODE"
     }
