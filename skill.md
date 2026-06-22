@@ -1,4 +1,4 @@
----
+﻿---
 name: punch-procedure
 description: 維護與部署 punch_relay Discord bot 時使用的 repository-local 操作規則。
 ---
@@ -214,6 +214,8 @@ git -c http.sslBackend=openssl -c "http.https://github.com/.extraheader=AUTHORIZ
 ### 自動同步健康判定
 
 `PunchRelayGitSync` 顯示 `Running` 只代表 watcher 程序存在，不代表自動推送正常。每次驗證都必須同時符合：
+
+watcher 必須在主迴圈輪詢 `git status --porcelain`，並在 repository 狀態連續穩定 45 秒後呼叫同步腳本；不要再用事件 action 修改 ``，避免事件 runspace 與主迴圈狀態不共用。
 
 1. `github_sync_watcher.log` 先出現 `change detected`，45 秒後出現 `debounce elapsed; running sync`。
 2. `github_sync.log` 出現 `sync check started`、`staged files:` 與 `push complete`。
