@@ -29,13 +29,13 @@ nssm.exe
 # Local migration helpers / backups
 *.bak
 apply_admin_patch.py
-install_service_admin.ps1
-punch_bot_service.py
 install_nssm_service.log
 
 # Python cache
 __pycache__/
 *.py[cod]
+.venv/
+.python/
 
 # Editor and OS files
 .vscode/
