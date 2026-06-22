@@ -86,17 +86,18 @@ FILE_PARAM = "hrm6p_edu.pkg,hrm6p.pkg,hrm6p_out_M1.pkg,hrm6fw_edu.pkg,hrm6bw.pkg
 DATA_FILE = "punch_data.json"
 
 RUNTIME_STATE_FILE = "bot_runtime_state.json"
+RUNTIME_STATE_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    RUNTIME_STATE_FILE
+)
 
 _previous_runtime_state = None
 _previous_run_unclean = False
 _runtime_started_at = None
 
 
-def _runtime_state_path():
-    return os.path.join(
-        os.path.dirname(os.path.abspath(__file__)),
-        RUNTIME_STATE_FILE
-    )
+def _runtime_state_path(path=RUNTIME_STATE_PATH):
+    return path
 
 
 def load_runtime_state():
