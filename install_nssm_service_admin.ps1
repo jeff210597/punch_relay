@@ -1,111 +1,94 @@
 param(
+    [string]$ControlUser = "$env:COMPUTERNAME\7c",
     [switch]$NoPause
 )
 
 $ErrorActionPreference = "Stop"
 $serviceName = "PunchBotService"
-$root = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
-$python = $null
-$nssm = Join-Path $root "tools\nssm\win32\nssm.exe"
+$root = $PSScriptRoot
+$python = Join-Path $root ".venv\Scripts\python.exe"
+$nssmArch = if ([Environment]::Is64BitOperatingSystem) { "win64" } else { "win32" }
+$nssm = Join-Path $root "tools\nssm\$nssmArch\nssm.exe"
 $logPath = Join-Path $root "install_nssm_service.log"
-
-if ([Environment]::Is64BitOperatingSystem) {
-    $nssm = Join-Path $root "tools\nssm\win64\nssm.exe"
-}
-
-$pythonCandidates = @(
-    (Join-Path $env:LOCALAPPDATA "Programs\Python\Python313\python.exe"),
-    (Join-Path $env:LOCALAPPDATA "Programs\Python\Python312\python.exe"),
-    (Join-Path $env:LOCALAPPDATA "Programs\Python\Python311\python.exe")
-)
-
-foreach ($candidate in $pythonCandidates) {
-    if (Test-Path -LiteralPath $candidate) {
-        $python = $candidate
-        break
-    }
-}
-
-if (-not $python) {
-    $pythonCmd = Get-Command python -ErrorAction SilentlyContinue
-    if ($pythonCmd) {
-        $python = $pythonCmd.Source
-    }
-}
-
-function Write-Log {
-    param([string]$Message)
-    $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $Message"
-    Write-Host $line
-    Add-Content -LiteralPath $logPath -Encoding UTF8 -Value $line
-}
 
 function Assert-Admin {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = [Security.Principal.WindowsPrincipal]::new($identity)
     if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-        throw "Please run this script as Administrator."
+        throw "This one-time setup must be run as Administrator."
     }
+}
+
+function Write-Log([string]$Message) {
+    $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $Message"
+    Write-Host $line
+    Add-Content -LiteralPath $logPath -Encoding UTF8 -Value $line
+}
+
+function Grant-ServiceControl([string]$Account) {
+    $sid = ([Security.Principal.NTAccount]$Account).Translate([Security.Principal.SecurityIdentifier]).Value
+    $sddl = ((& sc.exe sdshow $serviceName) | Where-Object { $_ -match '^D:' } | Select-Object -First 1).Trim()
+    if (-not $sddl) { throw "Unable to read the service security descriptor." }
+    if ($sddl -match [regex]::Escape($sid)) {
+        Write-Log "$Account already has service control permission."
+        return
+    }
+
+    # Query config/status plus start, stop, pause/continue and interrogate; no config/delete rights.
+    $ace = "(A;;CCLCSWRPWPDTLOCRRC;;;$sid)"
+    $systemAclIndex = $sddl.IndexOf("S:")
+    $updated = if ($systemAclIndex -ge 0) {
+        $sddl.Insert($systemAclIndex, $ace)
+    } else {
+        "$sddl$ace"
+    }
+    & sc.exe sdset $serviceName $updated | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Unable to grant service control to $Account." }
+    Write-Log "Granted $Account limited control of $serviceName."
 }
 
 Set-Location $root
-Set-Content -LiteralPath $logPath -Encoding UTF8 -Value "PunchBotService NSSM install log"
-
+Set-Content -LiteralPath $logPath -Encoding UTF8 -Value "PunchBotService one-time setup log"
 Assert-Admin
-Write-Log "Running as Administrator."
-Write-Log "Using NSSM: $nssm"
 
-if (-not $python -or -not (Test-Path -LiteralPath $python)) {
-    throw "Python not found: $python"
-}
-if (-not (Test-Path -LiteralPath $nssm)) {
-    throw "NSSM not found: $nssm"
-}
+if (-not (Test-Path -LiteralPath $python)) { throw "Missing virtual environment Python: $python" }
+if (-not (Test-Path -LiteralPath $nssm)) { throw "Missing NSSM: $nssm" }
 
 & $python -m py_compile "bot_all_in_one.py"
+if ($LASTEXITCODE -ne 0) { throw "Python syntax check failed." }
 Write-Log "Python syntax check passed."
 
 $existing = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
-if ($existing) {
-    Write-Log "Service exists; stopping before reconfiguring."
-    if ($existing.Status -ne "Stopped") {
-        Stop-Service -Name $serviceName -Force
-        Start-Sleep -Seconds 3
-    }
-} else {
-    Write-Log "Installing NSSM service."
+if ($existing -and $existing.Status -ne "Stopped") {
+    Stop-Service -Name $serviceName -Force
+    Start-Sleep -Seconds 3
+}
+if (-not $existing) {
     & $nssm install $serviceName $python "bot_all_in_one.py" | ForEach-Object { Write-Log $_ }
+    if ($LASTEXITCODE -ne 0) { throw "NSSM service installation failed." }
 }
 
-& $nssm set $serviceName AppDirectory $root | ForEach-Object { Write-Log $_ }
-& $nssm set $serviceName DisplayName "Punch Relay Discord Bot" | ForEach-Object { Write-Log $_ }
-& $nssm set $serviceName Description "Runs the punch_relay Discord bot." | ForEach-Object { Write-Log $_ }
-& $nssm set $serviceName Start SERVICE_AUTO_START | ForEach-Object { Write-Log $_ }
-& $nssm set $serviceName AppStopMethodConsole 1500 | ForEach-Object { Write-Log $_ }
-& $nssm set $serviceName AppThrottle 5000 | ForEach-Object { Write-Log $_ }
+& $nssm set $serviceName Application $python | Out-Null
+& $nssm set $serviceName AppParameters "bot_all_in_one.py" | Out-Null
+& $nssm set $serviceName AppDirectory $root | Out-Null
+& $nssm set $serviceName DisplayName "Punch Relay Discord Bot" | Out-Null
+& $nssm set $serviceName Description "Runs Punch Relay with automatic recovery and health checks." | Out-Null
+& $nssm set $serviceName Start SERVICE_AUTO_START | Out-Null
+& $nssm set $serviceName AppExit Default Restart | Out-Null
+& $nssm set $serviceName AppRestartDelay 10000 | Out-Null
+& $nssm set $serviceName AppThrottle 10000 | Out-Null
+& $nssm set $serviceName AppStopMethodConsole 3000 | Out-Null
+& $nssm set $serviceName AppRotateFiles 1 | Out-Null
+& $nssm set $serviceName AppRotateOnline 1 | Out-Null
+& $nssm set $serviceName AppRotateBytes 1048576 | Out-Null
 
-$syncFlag = Join-Path $root "synced.flag"
-if (Test-Path -LiteralPath $syncFlag) {
-    Remove-Item -LiteralPath $syncFlag -Force
-    Write-Log "Removed synced.flag to force Discord command resync."
-}
-
-Write-Log "Starting service."
+Grant-ServiceControl $ControlUser
 Start-Service -Name $serviceName
-Start-Sleep -Seconds 12
-
+Start-Sleep -Seconds 10
 $svc = Get-Service -Name $serviceName
-Write-Log "Service status: $($svc.Status)"
+Write-Log "Service status: $($svc.Status); startup: $($svc.StartType)"
 
-$botLog = Join-Path $root "bot.log"
-if (Test-Path -LiteralPath $botLog) {
-    Write-Log "Latest bot.log tail:"
-    Get-Content -LiteralPath $botLog -Encoding UTF8 -Tail 40 | ForEach-Object {
-        Add-Content -LiteralPath $logPath -Encoding UTF8 -Value $_
-        Write-Host $_
-    }
+if (Test-Path (Join-Path $root "bot.log")) {
+    Get-Content (Join-Path $root "bot.log") -Encoding UTF8 -Tail 25
 }
-
-if (-not $NoPause) {
-    Read-Host "Press Enter to close"
-}
+if (-not $NoPause) { Read-Host "Press Enter to close" }

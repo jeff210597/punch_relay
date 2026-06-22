@@ -1,12 +1,13 @@
 import sys
 import io
 import os
+import ctypes
 
 # 背景執行（工作排程器）時沒有終端機，將 stdout/stderr 導向 log 檔案
 # 同時解決 cp950 無法處理 emoji 的問題
 try:
     _log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot.log")
-    _log_file = open(_log_path, "a", encoding="utf-8", errors="replace")
+    _log_file = open(_log_path, "a", encoding="utf-8", errors="replace", buffering=1)
     sys.stdout = _log_file
     sys.stderr = _log_file
 except Exception:
@@ -25,8 +26,8 @@ import json
 import os
 import re
 import random
+import calendar
 from datetime import datetime, date, timedelta
-from punch_parser import parse_today_punch_html
 
 urllib3.disable_warnings()
 
@@ -50,12 +51,32 @@ def load_local_env():
 
 load_local_env()
 
+# Prevent two Windows sessions or two NSSM launches from running the bot together.
+_instance_mutex = None
+
+def acquire_single_instance():
+    global _instance_mutex
+    if os.name != "nt":
+        return
+    _instance_mutex = ctypes.windll.kernel32.CreateMutexW(None, False, "Global\\PunchRelayBotSingleInstance")
+    if not _instance_mutex:
+        print("❌ 已有另一個 Punch Relay Bot 實例正在執行，本次啟動結束。")
+        raise SystemExit(2)
+    if ctypes.windll.kernel32.GetLastError() == 183:
+        # NSSM may report the old service stopped a moment before Python releases
+        # the mutex. Wait briefly so a normal restart does not create a retry loop.
+        wait_result = ctypes.windll.kernel32.WaitForSingleObject(_instance_mutex, 20000)
+        if wait_result != 0:
+            print("❌ 已有另一個 Punch Relay Bot 實例正在執行，本次啟動結束。")
+            raise SystemExit(2)
+
 # =====================
 # 設定區（只需要改這裡）
 # =====================
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
 NOTIFY_CHANNEL_ID = int(os.getenv("NOTIFY_CHANNEL_ID", "0"))
-ADMIN_ALERT_CHANNEL_ID = int(os.getenv("ADMIN_ALERT_CHANNEL_ID", "1514929880448630904"))
+ADMIN_ALERT_CHANNEL_ID = int(os.getenv("ADMIN_ALERT_CHANNEL_ID", "0"))
+DISCONNECT_RESTART_SECONDS = max(60, int(os.getenv("DISCONNECT_RESTART_SECONDS", "300")))
 
 EHR_BASE = os.getenv("EHR_BASE", "").rstrip("/")
 PUNCH_URL = f"{EHR_BASE}/servlet/jform"
@@ -276,80 +297,6 @@ def make_enc(empid, password):
         result += format(ord(c), '02x')
     return result
 
-# =====================
-# 查詢今日打卡記錄
-# =====================
-def query_today_punch(session, empid):
-    """查詢今天的刷卡記錄，使用已登入的 session"""
-    import re as re_mod
-    from html import unescape
-
-    try:
-        today = date.today()
-        roc_year = today.year - 1911
-        yymm = f"{roc_year}{today.month:02d}"
-        query_file = "hrm6p_edu.pkg,hrm6p.pkg,hrm6p_out_M1.pkg,hrm6fw_edu.pkg,hrm6bw.pkg,hrm6aw_edu.pkg,hrm6jw_edu.pkg,hrm6p_out_M21.pkg"
-
-        # 先 GET B9 頁面取得 enc
-        b9_page = session.get(
-            f"{PUNCH_URL}?file={query_file}&init_func=B9.%E8%80%83%E5%8B%A4%E5%BD%99%E7%B8%BD%E8%A1%A8.",
-            timeout=10, verify=False
-        )
-        b9_html = unescape(b9_page.text)
-        enc_match = re_mod.search(r'name=enc\s+value="([^"]+)"', b9_html)
-        enc = enc_match.group(1) if enc_match else ""
-
-        dept_match = re_mod.search(r"EMPID[^>]*value='([^']+)'", b9_html)
-        if not dept_match:
-            dept_match = re_mod.search(r"'([0-9]+)'", b9_html)
-        dept_no = dept_match.group(1) if dept_match else ""
-
-        # POST 查詢
-        payload = {
-            "time": str(int(time.time() * 1000)),
-            "form_ajax": "1",
-            "encodeURIComponent": "1",
-            "FUNCTION_NAME": "B9.\u8003\u52e4\u5f59\u7e3d\u8868.",
-            "act": "",
-            "init_func": "",
-            "flow_approve": "",
-            "buttonid": "button2",
-            "buttonlink": "Entry View",
-            "fromlink": "Entry View",
-            "table_data": "",
-            "form_target": "",
-            "menu_display_flag": "",
-            "em_step": "0",
-            "em_POSITION": "1",
-            "file": query_file,
-            "enc": enc,
-            "user_id": empid,
-            "CONDITION_B": f"+and+a.EMPID%3D%27{empid}%27",
-            "showNOTCARD": "N",
-            "YYMM": yymm,
-            "SKIND": "B",
-            "SDATE": f"{roc_year}{today.month:02d}01",
-            "EDATE": f"{roc_year}{today.month:02d}30",
-            "EMPID": empid,
-        }
-
-        resp = session.post(
-            PUNCH_URL,
-            data=payload,
-            headers={
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Referer": f"{PUNCH_URL}?file={query_file}",
-                "X-Requested-With": "XMLHttpRequest",
-            },
-            timeout=15, verify=False
-        )
-
-        return parse_today_punch_html(resp.text, empid, today)
-
-    except Exception as e:
-        return {"success": False, "message": f"查詢失敗：{str(e)}"}
-
-
 def _t2m(t_str):
     """HH:MM 字串轉分鐘數，解析失敗回傳 -1"""
     try:
@@ -499,7 +446,7 @@ def punch_clock(empid, password, action):
         if "<Message>" in text and "<data>" in text:
             # 打卡成功後等3秒再查詢確認記錄
             time.sleep(3)
-            query_result = query_today_punch(session, empid)
+            query_result = _query_today_from_monthly_b9(empid, password)
             if query_result.get("success") and query_result.get("times"):
                 times_str = "、".join(query_result["times"])
                 return {
@@ -1190,16 +1137,7 @@ async def auto_punch_task(client):
                     continue
                 try:
                     def do_check(ep=empid_c, pw=password_c):
-                        import requests as req
-                        import urllib3 as ul3
-                        ul3.disable_warnings()
-                        sess = req.Session()
-                        sess.get(f"{PUNCH_URL}?file={FILE_PARAM}", verify=False, timeout=10)
-                        sess.post(PUNCH_URL, data={"file": FILE_PARAM, "uid": ep, "pwd": pw, "image.x": "0", "image.y": "0"},
-                                  headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=15, verify=False)
-                        query_file = "hrm6p_edu.pkg,hrm6p.pkg,hrm6p_out_M1.pkg,hrm6fw_edu.pkg,hrm6bw.pkg,hrm6aw_edu.pkg,hrm6jw_edu.pkg,hrm6p_out_M21.pkg"
-                        sess.get(f"{PUNCH_URL}?file={query_file}&init_func=B9.%E8%80%83%E5%8B%A4%E5%BD%99%E7%B8%BD%E8%A1%A8.", verify=False, timeout=10)
-                        return query_today_punch(sess, ep)
+                        return _query_today_from_monthly_b9(ep, pw)
                     result_c = await asyncio.get_event_loop().run_in_executor(None, do_check)
                     inferred_c = infer_punch_times(result_c, False) if result_c.get("success") else {"inferred_out": None, "out_source": None}
                     eff_out_c = inferred_c["inferred_out"]
@@ -1261,16 +1199,7 @@ async def auto_punch_task(client):
                     continue
                 try:
                     def do_check2(ep=empid_c2, pw=password_c2):
-                        import requests as req
-                        import urllib3 as ul3
-                        ul3.disable_warnings()
-                        sess = req.Session()
-                        sess.get(f"{PUNCH_URL}?file={FILE_PARAM}", verify=False, timeout=10)
-                        sess.post(PUNCH_URL, data={"file": FILE_PARAM, "uid": ep, "pwd": pw, "image.x": "0", "image.y": "0"},
-                                  headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=15, verify=False)
-                        query_file = "hrm6p_edu.pkg,hrm6p.pkg,hrm6p_out_M1.pkg,hrm6fw_edu.pkg,hrm6bw.pkg,hrm6aw_edu.pkg,hrm6jw_edu.pkg,hrm6p_out_M21.pkg"
-                        sess.get(f"{PUNCH_URL}?file={query_file}&init_func=B9.%E8%80%83%E5%8B%A4%E5%BD%99%E7%B8%BD%E8%A1%A8.", verify=False, timeout=10)
-                        return query_today_punch(sess, ep)
+                        return _query_today_from_monthly_b9(ep, pw)
                     result_c2 = await asyncio.get_event_loop().run_in_executor(None, do_check2)
                     inferred_c2 = infer_punch_times(result_c2, True) if result_c2.get("success") else {"inferred_out": None, "out_source": None}
                     eff_out_c2 = inferred_c2["inferred_out"]
@@ -1377,6 +1306,7 @@ def _query_monthly_b9(empid, password):
         today = date.today()
         roc_year = today.year - 1911
         yymm = f"{roc_year}{today.month:02d}"
+        month_last_day = calendar.monthrange(today.year, today.month)[1]
         query_file = "hrm6p_edu.pkg,hrm6p.pkg,hrm6p_out_M1.pkg,hrm6fw_edu.pkg,hrm6bw.pkg,hrm6aw_edu.pkg,hrm6jw_edu.pkg,hrm6p_out_M21.pkg"
 
         b9_page = sess.get(
@@ -1407,7 +1337,7 @@ def _query_monthly_b9(empid, password):
             "YYMM": yymm,
             "SKIND": "B",
             "SDATE": f"{roc_year}{today.month:02d}01",
-            "EDATE": f"{roc_year}{today.month:02d}30",
+            "EDATE": f"{roc_year}{today.month:02d}{month_last_day:02d}",
             "EMPID": empid,
         }
         resp = sess.post(PUNCH_URL, data=payload, headers={
@@ -1477,16 +1407,23 @@ def _parse_monthly_records(html):
         raw_out = td_texts[6] if len(td_texts) > 6 else ""
         abnormal = td_texts[7].strip() if len(td_texts) > 7 else ""
         raw_times_str = td_texts[10].strip() if len(td_texts) > 10 else ""
+        makeup_times_str = td_texts[11].strip() if len(td_texts) > 11 else ""
 
         clock_in  = f"{raw_in[:2]}:{raw_in[2:]}"   if clean_time(raw_in)  else None
         clock_out = f"{raw_out[:2]}:{raw_out[2:]}"  if clean_time(raw_out) else None
 
-        raw_times = []
-        if raw_times_str:
-            for t in raw_times_str.split(','):
+        def parse_time_list(value):
+            parsed = []
+            if not value:
+                return parsed
+            for t in value.split(','):
                 t = t.strip()
                 if re.fullmatch(r'\d{4}', t):
-                    raw_times.append(f"{t[:2]}:{t[2:]}")
+                    parsed.append(f"{t[:2]}:{t[2:]}")
+            return parsed
+
+        raw_times = parse_time_list(raw_times_str)
+        makeup_times = parse_time_list(makeup_times_str)
 
         records.append({
             "date": roc_date,
@@ -1494,8 +1431,43 @@ def _parse_monthly_records(html):
             "out": clock_out,
             "abnormal": abnormal,
             "raw_times": raw_times,
+            "makeup_times": makeup_times,
         })
     return records
+
+def _query_today_from_monthly_b9(empid, password, target_date=None):
+    """Use the B9 monthly table as the source of truth for index 5/6 and raw punches."""
+    target_date = target_date or date.today()
+    html = _query_monthly_b9(empid, password)
+    if not html:
+        return {"success": False, "message": "B9 考勤彙總表查詢失敗"}
+
+    roc_date = f"{target_date.year - 1911:03d}/{target_date.month:02d}/{target_date.day:02d}"
+    record = next((item for item in _parse_monthly_records(html) if item.get("date") == roc_date), None)
+    if not record:
+        return {"success": False, "message": "今日尚無刷卡記錄"}
+
+    clock_in = record.get("in")
+    clock_out = record.get("out")
+    times = set(record.get("raw_times") or [])
+    times.update(record.get("makeup_times") or [])
+    if clock_in:
+        times.add(clock_in)
+    if clock_out:
+        times.add(clock_out)
+    if not times:
+        return {"success": False, "message": "今日尚無刷卡記錄"}
+
+    return {
+        "success": True,
+        "times": sorted(times),
+        "raw_times": sorted(set(record.get("raw_times") or [])),
+        "makeup_times": sorted(set(record.get("makeup_times") or [])),
+        "clock_in": clock_in,
+        "clock_out": clock_out,
+        "abnormal": record.get("abnormal", ""),
+        "source": "b9",
+    }
 
 def _query_monthly_summary(empid, password, user_data=None):
     """查詢月底摘要，回傳格式化字串"""
@@ -1877,16 +1849,7 @@ async def new_user_punch_assessment(discord_user, uid_str, empid, password, user
     try:
         # 登入查詢 e-HR
         def do_assess(ep=empid, pw=password):
-            import requests as req
-            import urllib3 as ul3
-            ul3.disable_warnings()
-            sess = req.Session()
-            sess.get(f"{PUNCH_URL}?file={FILE_PARAM}", verify=False, timeout=10)
-            sess.post(PUNCH_URL,
-                      data={"file": FILE_PARAM, "uid": ep, "pwd": pw, "image.x": "0", "image.y": "0"},
-                      headers={"Content-Type": "application/x-www-form-urlencoded"},
-                      timeout=15, verify=False)
-            return query_today_punch(sess, ep)
+            return _query_today_from_monthly_b9(ep, pw)
 
         result = await asyncio.get_event_loop().run_in_executor(None, do_assess)
         inferred = infer_punch_times(result, is_duty_after) if result.get("success") else {
@@ -2276,18 +2239,7 @@ async def today_status(interaction: discord.Interaction):
     # 查詢 e-HR 實際刷卡記錄
     loop = asyncio.get_event_loop()
     def do_status_query():
-        import requests as req
-        import urllib3 as ul3
-        ul3.disable_warnings()
-        sess = req.Session()
-        sess.get(f"{PUNCH_URL}?file={FILE_PARAM}", verify=False, timeout=10)
-        sess.post(PUNCH_URL, data={
-            "file": FILE_PARAM, "uid": empid, "pwd": password,
-            "image.x": "0", "image.y": "0"
-        }, headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=15, verify=False)
-        query_file = "hrm6p_edu.pkg,hrm6p.pkg,hrm6p_out_M1.pkg,hrm6fw_edu.pkg,hrm6bw.pkg,hrm6aw_edu.pkg,hrm6jw_edu.pkg,hrm6p_out_M21.pkg"
-        sess.get(f"{PUNCH_URL}?file={query_file}&init_func=B9.%E8%80%83%E5%8B%A4%E5%BD%99%E7%B8%BD%E8%A1%A8.", verify=False, timeout=10)
-        return query_today_punch(sess, empid)
+        return _query_today_from_monthly_b9(empid, password, today)
 
     result = await loop.run_in_executor(None, do_status_query)
 
@@ -2663,37 +2615,7 @@ async def query_punch_record(interaction: discord.Interaction, 員工編號: str
         loop = asyncio.get_event_loop()
 
         def do_query():
-            import requests as req
-            import urllib3 as ul3
-            ul3.disable_warnings()
-            sess = req.Session()
-
-            # 步驟1：GET 首頁取得初始 cookie
-            sess.get(f"{PUNCH_URL}?file={FILE_PARAM}", verify=False, timeout=10)
-
-            # 步驟2：POST 登入
-            login_payload = {
-                "file": FILE_PARAM,
-                "uid": empid,
-                "pwd": password,
-                "image.x": "0",
-                "image.y": "0",
-            }
-            sess.post(
-                PUNCH_URL,
-                data=login_payload,
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
-                timeout=15, verify=False
-            )
-
-            # 步驟3：GET B9 頁面（跟測試檔一樣的流程）
-            query_file = "hrm6p_edu.pkg,hrm6p.pkg,hrm6p_out_M1.pkg,hrm6fw_edu.pkg,hrm6bw.pkg,hrm6aw_edu.pkg,hrm6jw_edu.pkg,hrm6p_out_M21.pkg"
-            sess.get(
-                f"{PUNCH_URL}?file={query_file}&init_func=B9.%E8%80%83%E5%8B%A4%E5%BD%99%E7%B8%BD%E8%A1%A8.",
-                verify=False, timeout=10
-            )
-
-            return query_today_punch(sess, empid)
+            return _query_today_from_monthly_b9(empid, password)
 
         result = await loop.run_in_executor(None, do_query)
 
@@ -2725,7 +2647,7 @@ async def query_punch_record(interaction: discord.Interaction, 員工編號: str
             eff_out    = inferred["inferred_out"]
             in_source  = inferred["in_source"]
             out_source = inferred["out_source"]
-            times_list = result.get("times", [])
+            times_list = sorted(set(result.get("raw_times", [])) | set(result.get("makeup_times", []))) or result.get("times", [])
 
             # ── 刷卡列表 ──
             desc_lines = [f"**{date_label} 刷卡記錄**", ""]
@@ -3043,6 +2965,7 @@ async def admin_query(interaction: discord.Interaction):
         embed = discord.Embed(title="📋 使用者狀態", description="目前無任何綁定使用者", color=0xffaa00)
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
+    await interaction.response.defer(ephemeral=True, thinking=True)
     lines = []
     today = date.today()
     yesterday = today - timedelta(days=1)
@@ -3052,6 +2975,28 @@ async def admin_query(interaction: discord.Interaction):
     punched_now = load_punched_today()
     saved_schedules = load_schedule_today()
     weekday_names = ["一", "二", "三", "四", "五", "六", "日"]
+
+    bound_users = [(uid, ud) for uid, ud in data.items() if ud.get("empid")]
+    loop = asyncio.get_event_loop()
+    query_tasks = [
+        loop.run_in_executor(
+            None,
+            _query_today_from_monthly_b9,
+            str(ud.get("empid")),
+            ud.get("password"),
+            today,
+        )
+        for uid, ud in bound_users
+    ]
+    query_values = await asyncio.gather(*query_tasks, return_exceptions=True)
+    ehr_results = {
+        uid: (
+            value
+            if isinstance(value, dict)
+            else {"success": False, "message": f"查詢失敗：{value}"}
+        )
+        for (uid, _), value in zip(bound_users, query_values)
+    }
 
     def fmt_dates(date_list):
         parts = []
@@ -3071,10 +3016,14 @@ async def admin_query(interaction: discord.Interaction):
     def punched_time(uid, kind):
         return punched_now.get(f"{uid}-{kind}-{today_str}")
 
-    def done_or_wait(uid, kind, label, schedule_time):
+    def done_or_wait(uid, kind, label, schedule_time, actual_time=None, actual_source=None):
+        if actual_time:
+            source_label = "e-HR 判定" if actual_source == "ehr" else "e-HR 原始／補刷卡"
+            return f"✅ {label}：{actual_time}（{source_label}）"
         punched_at = punched_time(uid, kind)
         if punched_at is not None:
-            return f"✅ {label}：{punched_at or schedule_time or '已打卡'}"
+            bot_time = punched_at or schedule_time or "已執行"
+            return f"⚠️ {label}：Bot {bot_time} 已執行，e-HR 尚無紀錄"
         if schedule_time:
             if schedule_time <= now_hm:
                 return f"⚠️ {label}：預計 {schedule_time}，尚無成功紀錄"
@@ -3106,6 +3055,12 @@ async def admin_query(interaction: discord.Interaction):
         scheduled_in = scheduled(uid, "in")
         scheduled_out = scheduled(uid, "out")
         scheduled_duty = scheduled(uid, "dutyout")
+        ehr_result = ehr_results.get(uid, {"success": False, "message": "查詢失敗"})
+        inferred = infer_punch_times(ehr_result, is_duty_after) if ehr_result.get("success") else {
+            "inferred_in": None, "inferred_out": None, "in_source": None, "out_source": None
+        }
+        actual_in = inferred.get("inferred_in")
+        actual_out = inferred.get("inferred_out")
 
         today_lines = []
         if not ud.get("auto_punch", True):
@@ -3117,7 +3072,7 @@ async def admin_query(interaction: discord.Interaction):
         elif is_duty_after:
             mode = "🌙 昨日值班後"
             today_lines.append("　上班：⏭️ 值班隔天不打上班卡")
-            today_lines.append("　" + done_or_wait(uid, "dutyout", "值班下班", scheduled_duty))
+            today_lines.append("　" + done_or_wait(uid, "dutyout", "值班下班", scheduled_duty, actual_out, inferred.get("out_source")))
         elif is_leave_today:
             mode = "🏖️ 今日休假"
             today_lines.append("　上班：⏭️ 休假不打卡")
@@ -3128,13 +3083,13 @@ async def admin_query(interaction: discord.Interaction):
             today_lines.append("　下班：⏭️ 週末不打卡")
         elif is_duty_today:
             mode = "🌙 今日值班"
-            today_lines.append("　" + done_or_wait(uid, "in", "上班", scheduled_in))
+            today_lines.append("　" + done_or_wait(uid, "in", "上班", scheduled_in, actual_in, inferred.get("in_source")))
             today_lines.append("　下班：⏭️ 今日值班不打下班卡")
             today_lines.append(f"　值班下班：明天 {scheduled_duty or '08:05~08:40'}")
         else:
             mode = "🟢 平日"
-            today_lines.append("　" + done_or_wait(uid, "in", "上班", scheduled_in))
-            today_lines.append("　" + done_or_wait(uid, "out", "下班", scheduled_out))
+            today_lines.append("　" + done_or_wait(uid, "in", "上班", scheduled_in, actual_in, inferred.get("in_source")))
+            today_lines.append("　" + done_or_wait(uid, "out", "下班", scheduled_out, actual_out, inferred.get("out_source")))
 
         lines.append(
             f"👤 <@{uid}>　員工編號：{empid}　自動打卡：{auto}\n"
@@ -3149,7 +3104,7 @@ async def admin_query(interaction: discord.Interaction):
         color=0x5865F2
     )
     embed.set_footer(text=f"查詢時間：{datetime.now().strftime('%H:%M')}")
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 @admin_group.command(name="今日打卡驗證", description="管理員查詢所有綁定使用者今日 e-HR 實際刷卡紀錄")
 @app_commands.default_permissions(administrator=True)
@@ -3179,24 +3134,7 @@ async def admin_verify_today(interaction: discord.Interaction):
         if not password:
             return {"success": False, "message": "未儲存密碼，無法登入 e-HR"}
         try:
-            sess = requests.Session()
-            sess.get(f"{PUNCH_URL}?file={FILE_PARAM}", timeout=10, verify=False)
-            login_resp = sess.post(
-                PUNCH_URL,
-                data={
-                    "file": FILE_PARAM,
-                    "uid": empid,
-                    "pwd": password,
-                    "image.x": "0",
-                    "image.y": "0",
-                },
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
-                timeout=15,
-                verify=False
-            )
-            if "hrlogin" in login_resp.text:
-                return {"success": False, "message": "登入失敗，請確認帳密"}
-            return query_today_punch(sess, empid)
+            return _query_today_from_monthly_b9(empid, password, today)
         except Exception as e:
             return {"success": False, "message": f"查詢失敗：{str(e)}"}
 
@@ -3289,8 +3227,10 @@ async def admin_verify_today(interaction: discord.Interaction):
             inferred = infer_punch_times(result, is_duty_after)
             actual_in = inferred.get("inferred_in")
             actual_out = inferred.get("inferred_out")
-            times = result.get("times", [])
-            raw_times = "、".join(times) if times else "無"
+            raw_values = result.get("raw_times", [])
+            makeup_values = result.get("makeup_times", [])
+            raw_times = "、".join(raw_values) if raw_values else "無"
+            makeup_times = "、".join(makeup_values) if makeup_values else "無"
 
             if is_duty_after:
                 detail_lines.append("　上班：⏭️ 值班隔天不打上班卡")
@@ -3318,6 +3258,8 @@ async def admin_verify_today(interaction: discord.Interaction):
                 )
 
             detail_lines.append(f"　e-HR 原始刷卡：{raw_times}")
+            if makeup_values:
+                detail_lines.append(f"　e-HR 補刷卡：{makeup_times}")
         else:
             message = result.get("message", "今日尚無刷卡記錄")
             if no_auto_expected and "今日尚無刷卡記錄" in message:
@@ -3688,20 +3630,39 @@ async def monthly_status(interaction: discord.Interaction):
     await interaction.response.send_message(embeds=[embed1, embed2], ephemeral=True)
 
 _auto_punch_started = False  # 確保 auto_punch_task 只啟動一次
-_commands_synced = False  # 每次程式啟動同步一次 slash command
+_commands_synced = False
+_discord_disconnected_at = None
+_health_tasks_started = False
+SYNC_FLAG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "synced.flag")
+
+async def discord_disconnect_watchdog():
+    """Exit a stuck Discord client so NSSM can restart it."""
+    while not client.is_closed():
+        await asyncio.sleep(30)
+        if _discord_disconnected_at is None:
+            continue
+        offline_seconds = time.monotonic() - _discord_disconnected_at
+        if offline_seconds >= DISCONNECT_RESTART_SECONDS:
+            print(f"❌ Discord 已斷線 {int(offline_seconds)} 秒，結束程序交由 NSSM 重啟。")
+            _log_file.flush()
+            os._exit(3)
 
 @client.event
 async def on_ready():
-    global _auto_punch_started, _commands_synced
-    # 每次程式啟動同步一次，確保新增/修改的 slash command 會出現在 Discord。
-    if not _commands_synced:
+    global _auto_punch_started, _commands_synced, _discord_disconnected_at, _health_tasks_started
+    _discord_disconnected_at = None
+    # Only sync after first install or when restart_bot_resync.ps1 removes the flag.
+    if not _commands_synced and not os.path.exists(SYNC_FLAG):
         try:
             await tree.sync()
             _commands_synced = True
+            with open(SYNC_FLAG, "w", encoding="utf-8") as f:
+                f.write(datetime.now().isoformat(timespec="seconds"))
             print("✅ 指令同步完成")
         except Exception as e:
             print(f"⚠️ 指令同步失敗：{e}")
     else:
+        _commands_synced = True
         print("✅ 指令已同步（跳過）")
     print(f"✅ Bot 已啟動：{client.user}")
 
@@ -3713,9 +3674,19 @@ async def on_ready():
     else:
         print("🔄 Discord 重新連線，auto_punch_task 繼續運行中")
 
+    if not _health_tasks_started:
+        _health_tasks_started = True
+        client.loop.create_task(discord_disconnect_watchdog())
+        print("✅ Discord 斷線監控已啟動")
+
 @client.event
 async def on_disconnect():
+    global _discord_disconnected_at
+    if _discord_disconnected_at is None:
+        _discord_disconnected_at = time.monotonic()
     print("⚠️ Discord 連線中斷，等待自動重連...")
 
 # reconnect=True（預設）讓 discord.py 自動重連，log_handler=None 避免重複設定
-client.run(DISCORD_TOKEN, reconnect=True, log_handler=None)
+if __name__ == "__main__":
+    acquire_single_instance()
+    client.run(DISCORD_TOKEN, reconnect=True, log_handler=None)
