@@ -106,6 +106,33 @@ watcher 會執行 `watch_github_sync.ps1`，忽略本機 runtime 與密鑰檔案
 
 GitHub 驗證缺失時，不要一直重試 `git push`，這會浪費時間與 token。
 
+### 固定發布前置流程
+
+每次上傳或更新 GitHub 前，先完成下列檢查，不要直接嘗試互動式 `git push`：
+
+```powershell
+git status --short --branch
+git log --oneline --decorate -5
+cmd /c set | findstr /i proxy
+gh --version
+```
+
+- 先清除目前 shell 的 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY`、`GIT_HTTP_PROXY`、`GIT_HTTPS_PROXY`，避免再次連到 `127.0.0.1:9`。
+- 設定 `GIT_TERMINAL_PROMPT=0`，讓缺少驗證時立即失敗，不要等待 credential helper 或登入視窗。
+- `gh` 不存在時，先安裝 GitHub CLI；`gh auth status` 未登入時，可使用本機 `PunchRelayGitSync` 服務已有的 `GITHUB_PAT` 作為目前程序的 `GH_TOKEN`，不要輸出或永久寫入 token。
+- Git HTTPS 使用 PAT 時，必須採用 `x-access-token:<PAT>` 的 Basic Authorization。不要使用 `Authorization: Bearer <PAT>` 交給 `git push`；本機曾因此沒有送出可用的 HTTPS credential，最後仍出現 `terminal prompts disabled`。
+
+標準單次推送格式如下：
+
+```powershell
+$env:GIT_TERMINAL_PROMPT='0'
+$pair = "x-access-token:$pat"
+$basic = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($pair))
+git -c credential.helper= -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $basic" push origin <branch>
+```
+
+`$pat` 只能從目前程序記憶體取得。不可把 PAT、Basic 字串或含 token 的 remote URL 印到 console、log 或文件。
+
 曾發生的卡住原因：`sync_to_github.ps1` 已經完成本機 commit，但 `git push` 進入 GitHub HTTPS credential helper/互動驗證流程，導致沒有 `push complete`，本機狀態變成 `main...origin/main [ahead 1]`，GitHub 看不到更新。
 
 使用這個順序：
@@ -183,6 +210,17 @@ git -c http.sslBackend=openssl -c "http.https://github.com/.extraheader=AUTHORIZ
 ```
 
 也要用 GitHub commit URL、GitHub connector，或其他遠端讀回方式確認 GitHub 真的收到，不要只看本機 commit。
+
+### 自動同步健康判定
+
+`PunchRelayGitSync` 顯示 `Running` 只代表 watcher 程序存在，不代表自動推送正常。每次驗證都必須同時符合：
+
+1. `github_sync_watcher.log` 先出現 `change detected`，45 秒後出現 `debounce elapsed; running sync`。
+2. `github_sync.log` 出現 `sync check started`、`staged files:` 與 `push complete`。
+3. 實際監看目錄的 `git status --short --branch` 不再顯示未提交修改或 `[ahead N]`。
+4. 使用 GitHub connector、commit URL 或 `git fetch origin` 後的遠端 SHA，確認 GitHub 確實收到新 commit。
+
+若只有 `change detected`，但 60 秒後仍沒有 `debounce elapsed`，代表 watcher 事件有收到、主迴圈卻沒有執行同步；此時自動同步功能判定為故障，不能回報正常。若 watcher 或 sync log 出現 `Tee-Object` / `Out-File` 檔案鎖定錯誤，也判定為故障，應先修正 watcher 的事件狀態傳遞與 log 寫入方式，再做一次可遠端驗證的測試。
 
 8. 若要用本機 Git 長期 push，繼續前建立穩定 credential：
 

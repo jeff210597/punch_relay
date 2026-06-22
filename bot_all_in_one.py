@@ -195,8 +195,31 @@ def validate_ehr_login(empid, password):
             timeout=15,
             verify=False
         )
-        if "hrlogin" in login_resp.text:
+        login_resp.raise_for_status()
+        if "hrlogin" in login_resp.text.lower():
             return {"success": False, "message": "登入失敗，請確認員工編號或密碼"}
+
+        # 登入 POST 未回到 hrlogin 並不代表帳密正確；錯誤頁或非預期回應也可能
+        # 沒有該字串。必須再開啟登入後的打卡頁，並取得該頁才會產生的 enc，
+        # 才能明確判定 session 已通過驗證。
+        punch_page = session.get(
+            f"{PUNCH_URL}?file={FILE_PARAM}&init_func=B8.%E7%B7%9A%E4%B8%8A%E7%B0%BD%E5%88%B0%E7%B0%BD%E9%80%80.",
+            timeout=10,
+            verify=False,
+        )
+        punch_page.raise_for_status()
+        if "hrlogin" in punch_page.text.lower():
+            return {"success": False, "message": "登入失敗，請確認員工編號或密碼"}
+        enc_match = re.search(
+            r'name\s*=\s*["\']?enc["\']?\s+value\s*=\s*["\']([^"\']+)["\']',
+            punch_page.text,
+            re.IGNORECASE,
+        )
+        if not enc_match:
+            return {
+                "success": False,
+                "message": "無法確認 e-HR 登入成功，帳號未綁定；請稍後重試或聯絡管理員",
+            }
         return {"success": True}
     except Exception as e:
         return {"success": False, "message": f"登入驗證連線失敗：{str(e)}"}
@@ -3184,6 +3207,9 @@ async def admin_verify_today(interaction: discord.Interaction):
     today = date.today()
     yesterday = today - timedelta(days=1)
     today_str = today.strftime("%Y-%m-%d")
+    now_hm = datetime.now().strftime("%H:%M")
+    saved_schedules = load_schedule_today()
+    punched_now = load_punched_today()
 
     def ehr_query_one(empid, password):
         if not password:
@@ -3231,6 +3257,30 @@ async def admin_verify_today(interaction: discord.Interaction):
             return f"✅ {label}：{actual_t}（{source_text(source)}）"
         return f"⚠️ {label}：e-HR 尚無紀錄"
 
+    def user_schedule(uid):
+        return saved_schedules.get(uid) or scheduled_times.get(uid, {})
+
+    def comparison_line(uid, kind, label, scheduled_t, actual_t, ehr_available):
+        if not ehr_available:
+            return f"　⚠️ {label}比對：e-HR 查詢失敗，無法比對"
+        if not scheduled_t:
+            return f"　⚠️ {label}比對：Bot 排程未取得"
+        if actual_t:
+            if scheduled_t == actual_t:
+                return f"　✅ {label}比對：Bot {scheduled_t} ＝ e-HR {actual_t}，相符"
+            return (
+                f"　⚠️ {label}比對：Bot {scheduled_t} ≠ e-HR {actual_t}，不相符\n"
+                "　　e-HR 已有刷卡紀錄，不代表打卡失敗"
+            )
+
+        punched_at = punched_now.get(f"{uid}-{kind}-{today_str}")
+        if punched_at is not None:
+            bot_t = punched_at or scheduled_t
+            return f"　⚠️ {label}比對：Bot {bot_t} 已執行，e-HR 尚無紀錄"
+        if scheduled_t <= now_hm:
+            return f"　⚠️ {label}比對：Bot 排程 {scheduled_t} 已過，e-HR 尚無紀錄"
+        return f"　⏳ {label}比對：尚未到排程時間 {scheduled_t}"
+
     lines = []
     for uid, ud in bound_users:
         empid = ud.get("empid")
@@ -3261,10 +3311,20 @@ async def admin_verify_today(interaction: discord.Interaction):
             or is_leave_today
             or (is_weekend_today and not is_duty_today)
         )
+        schedule = user_schedule(uid)
+        scheduled_in = schedule.get("in", "")
+        scheduled_out = schedule.get("out", "")
+        scheduled_duty = schedule.get("dutyout", "")
+        actual_in = None
+        actual_out = None
+        result_message = result.get("message", "")
+        ehr_available = result.get("success", False) or "今日尚無刷卡記錄" in result_message
 
         detail_lines = [f"👤 <@{uid}>　員工編號：{empid}", f"　今日模式：{mode}"]
         if result.get("success"):
             inferred = infer_punch_times(result, is_duty_after)
+            actual_in = inferred.get("inferred_in")
+            actual_out = inferred.get("inferred_out")
             times = result.get("times", [])
             raw_times = "、".join(times) if times else "無"
 
@@ -3300,6 +3360,28 @@ async def admin_verify_today(interaction: discord.Interaction):
                 detail_lines.append("　✅ e-HR 今日無刷卡紀錄（符合今日模式）")
             else:
                 detail_lines.append(f"　⚠️ e-HR 查詢結果：{message}")
+
+        detail_lines.append("")
+        if no_auto_expected:
+            detail_lines.append("　🤖 Bot 排程：今日不自動打卡")
+        elif is_duty_after:
+            duty_text = scheduled_duty or "排程未取得"
+            detail_lines.append(f"　🤖 Bot 排程：值班下班 {duty_text}")
+            detail_lines.append(
+                comparison_line(uid, "dutyout", "值班下班", scheduled_duty, actual_out, ehr_available)
+            )
+        elif is_duty_today:
+            in_text = scheduled_in or "排程未取得"
+            duty_text = scheduled_duty or "排程未取得"
+            detail_lines.append(f"　🤖 Bot 排程：上班 {in_text}｜值班下班（明天）{duty_text}")
+            detail_lines.append(comparison_line(uid, "in", "上班", scheduled_in, actual_in, ehr_available))
+            detail_lines.append("　⏭️ 值班下班比對：明天才驗證")
+        else:
+            in_text = scheduled_in or "排程未取得"
+            out_text = scheduled_out or "排程未取得"
+            detail_lines.append(f"　🤖 Bot 排程：上班 {in_text}｜下班 {out_text}")
+            detail_lines.append(comparison_line(uid, "in", "上班", scheduled_in, actual_in, ehr_available))
+            detail_lines.append(comparison_line(uid, "out", "下班", scheduled_out, actual_out, ehr_available))
 
         lines.append("\n".join(detail_lines))
 
