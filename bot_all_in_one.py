@@ -107,7 +107,8 @@ def load_runtime_state():
         if not os.path.exists(path):
             return None
 
-        with open(path, "r", encoding="utf-8") as f:
+        # utf-8-sig also accepts the BOM emitted by Windows PowerShell 5.
+        with open(path, "r", encoding="utf-8-sig") as f:
             data = json.load(f)
 
         return data if isinstance(data, dict) else None
