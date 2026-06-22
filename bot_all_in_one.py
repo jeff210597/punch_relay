@@ -26,6 +26,7 @@ import os
 import re
 import random
 from datetime import datetime, date, timedelta
+from punch_parser import parse_today_punch_html
 
 urllib3.disable_warnings()
 
@@ -146,6 +147,17 @@ def save_user_data(user_id, user_data):
     data = load_data()
     data[str(user_id)] = user_data
     save_data(data)
+
+def enable_auto_punch(user_data, check_date=None):
+    """Enable auto punch and clear the one-day cancellation for check_date."""
+    check_date = check_date or date.today()
+    today_str = check_date.strftime("%Y-%m-%d")
+    cancel_dates = user_data.setdefault("cancel_dates", [])
+    was_cancelled = today_str in cancel_dates
+    if was_cancelled:
+        cancel_dates.remove(today_str)
+    user_data["auto_punch"] = True
+    return was_cancelled
 
 def mark_rebind_confirm_only(user_data):
     """After binding, past-due punches require user confirmation instead of auto catch-up."""
@@ -332,80 +344,7 @@ def query_today_punch(session, empid):
             timeout=15, verify=False
         )
 
-        html = unescape(resp.text)
-
-        # ── 找今天日期，相容補零與不補零格式（115/06/08 或 115/6/8）──
-        target_pattern = re_mod.compile(
-            rf'{roc_year}/0?{today.month}/0?{today.day}(?!\d)'
-        )
-        m = target_pattern.search(html)
-        if not m:
-            return {"success": False, "message": "今日尚無刷卡記錄"}
-
-        # ── 從日期位置往前找最近的 <TR，確保從整行開始解析 ──
-        date_idx = m.start()
-        tr_match = None
-        for tr_m in re_mod.finditer(r'<TR[^>]*>', html[:date_idx], re_mod.IGNORECASE):
-            tr_match = tr_m
-        if tr_match is None:
-            return {"success": False, "message": "今日尚無刷卡記錄"}
-
-        # 取該 TR 到下一個 TR 之間的內容（最多 3000 字元）
-        row_start = tr_match.start()
-        row_text = html[row_start:row_start + 3000]
-
-        # ── 用 <TD 切割法正確解析各欄 ──
-        # 欄位順序：部門/員工編號/姓名/日期/班別/刷卡/出卡/異常/請假/加班/刷卡資料/補刷卡
-        # index:     0    1       2    3    4   /5  /6  / 7  / 8  / 9  /10        /11
-        from html import unescape as _ue2
-
-        td_parts = re_mod.split(r'<TD[^>]*>', row_text, flags=re_mod.IGNORECASE)
-        td_texts = []
-        for part in td_parts[1:]:
-            text = re_mod.sub(r'<[^>]+>', '', part)
-            text = _ue2(text).replace('&nbsp;', '').replace('\xa0', '').strip()
-            td_texts.append(text)
-
-        def _clean4(s):
-            s = s.strip()
-            return s if re_mod.fullmatch(r'\d{4}', s) else None
-
-        # 主要來源：e-HR 系統判定欄（刷卡=index5，出卡=index6）
-        raw_in_str  = td_texts[5] if len(td_texts) > 5 else ""
-        raw_out_str = td_texts[6] if len(td_texts) > 6 else ""
-        clock_in  = f"{raw_in_str[:2]}:{raw_in_str[2:]}"  if _clean4(raw_in_str)  else None
-        clock_out = f"{raw_out_str[:2]}:{raw_out_str[2:]}" if _clean4(raw_out_str) else None
-
-        # 刷卡資料欄（index10）：所有原始打卡記錄（逗號分隔）
-        raw_times_str = td_texts[10].strip() if len(td_texts) > 10 else ""
-        all_times = []
-        if raw_times_str:
-            for t in raw_times_str.split(','):
-                t = t.strip()
-                if re_mod.fullmatch(r'\d{4}', t):
-                    h, mn = int(t[:2]), int(t[2:])
-                    if 0 <= h <= 23 and 0 <= mn <= 59:
-                        all_times.append(f"{t[:2]}:{t[2:]}")
-
-        # 若刷卡資料欄只有單筆（不含逗號），嘗試直接解析
-        if not all_times and re_mod.fullmatch(r'\d{4}', raw_times_str):
-            h, mn = int(raw_times_str[:2]), int(raw_times_str[2:])
-            if 0 <= h <= 23 and 0 <= mn <= 59:
-                all_times.append(f"{raw_times_str[:2]}:{raw_times_str[2:]}")
-
-        # 回傳原始欄位，不在此做情境推算
-        # clock_in  = e-HR index5（人資系統判定上班時間，空代表尚未判定）
-        # clock_out = e-HR index6（人資系統判定下班/退卡時間，空代表尚未判定）
-        # times     = index10 所有原始刷卡記錄（排序後），供上層依情境推算
-        if all_times or clock_in or clock_out:
-            return {
-                "success": True,
-                "times": sorted(all_times),
-                "clock_in": clock_in,
-                "clock_out": clock_out,
-            }
-
-        return {"success": False, "message": "今日尚無刷卡記錄"}
+        return parse_today_punch_html(resp.text, empid, today)
 
     except Exception as e:
         return {"success": False, "message": f"查詢失敗：{str(e)}"}
@@ -2102,7 +2041,7 @@ class BindModal(discord.ui.Modal, title='綁定打卡帳號'):
             user_data = get_user_data(interaction.user.id)
             user_data["empid"] = empid
             user_data["password"] = password
-            user_data["auto_punch"] = True
+            enable_auto_punch(user_data)
             mark_rebind_confirm_only(user_data)
             save_user_data(interaction.user.id, user_data)
             embed = discord.Embed(
@@ -2274,7 +2213,7 @@ async def resume_auto(interaction: discord.Interaction):
     today_str = date.today().strftime("%Y-%m-%d")
     if today_str in user_data.get("cancel_dates", []):
         user_data["cancel_dates"].remove(today_str)
-    user_data["auto_punch"] = True
+    enable_auto_punch(user_data)
     save_user_data(interaction.user.id, user_data)
     embed = discord.Embed(
         title="▶️ 自動打卡已恢復",
@@ -2968,7 +2907,7 @@ class AdminBindModal(discord.ui.Modal, title='管理員代綁定帳號'):
             user_data = get_user_data(self.target_user.id)
             user_data["empid"] = empid
             user_data["password"] = password
-            user_data["auto_punch"] = True
+            enable_auto_punch(user_data)
             mark_rebind_confirm_only(user_data)
             save_user_data(self.target_user.id, user_data)
 
@@ -3018,6 +2957,31 @@ async def admin_unbind_user(interaction: discord.Interaction, 使用者: discord
         title="✅ 已解除綁定",
         description=f"對象：{使用者.mention}\n帳號已解除，自動打卡停止。",
         color=0xffaa00
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@admin_group.command(name="恢復自動打卡", description="管理員替指定使用者恢復今天的自動打卡")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(使用者="要恢復自動打卡的 Discord 使用者")
+async def admin_resume_auto(interaction: discord.Interaction, 使用者: discord.User):
+    if await reject_non_admin(interaction):
+        return
+    user_data = get_user_data(使用者.id)
+    if not user_data.get("empid") or not user_data.get("password"):
+        embed = discord.Embed(
+            title="❌ 尚未綁定帳號",
+            description=f"對象：{使用者.mention}\n請先使用 `/管理 綁定` 完成帳號綁定。",
+            color=0xff0000,
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    cancelled_today = enable_auto_punch(user_data)
+    save_user_data(使用者.id, user_data)
+    detail = "已移除今日取消設定，今天恢復自動打卡。" if cancelled_today else "今天的自動打卡已是開啟狀態。"
+    embed = discord.Embed(
+        title="▶️ 已恢復自動打卡",
+        description=f"對象：{使用者.mention}\n{detail}",
+        color=0x00ff00,
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -3506,6 +3470,7 @@ async def help_command(interaction: discord.Interaction):
                 "`/管理 帳號` — 查看所有綁定使用者狀態\n"
                 "`/管理 今日打卡驗證` — 查詢所有綁定使用者今日 e-HR 實際刷卡紀錄\n"
                 "`/管理 綁定`、`/管理 解除綁定` — 代替指定使用者管理帳號\n"
+                "`/管理 恢復自動打卡` — 替指定使用者移除今日取消設定\n"
                 "`/管理 值班設定/新增/取消`、`/管理 休假設定/新增/取消` — 代替指定使用者調整日期"
             ),
             inline=False
