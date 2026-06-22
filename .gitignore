@@ -10,6 +10,8 @@ punch_data.json
 punched_today.json
 schedule_today.json
 admin_alerts_today.json
+bot_runtime_state.json
+bot_runtime_state.json.tmp
 synced.flag
 
 # Secrets and local environment

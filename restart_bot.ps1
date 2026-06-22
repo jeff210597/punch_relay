@@ -3,6 +3,17 @@ $ErrorActionPreference = "Stop"
 $serviceName = "PunchBotService"
 $root = $PSScriptRoot
 
+$runtimeState = Join-Path $root "bot_runtime_state.json"
+
+$plannedStop = @{
+    state = "clean_exit"
+    reason = "planned restart via restart_bot.ps1"
+    pid = $PID
+    updated_at = (Get-Date).ToString("yyyy-MM-ddTHH:mm:ss")
+} | ConvertTo-Json
+
+Set-Content -LiteralPath $runtimeState -Value $plannedStop -Encoding UTF8
+
 & sc.exe stop $serviceName | Out-Null
 $deadline = (Get-Date).AddSeconds(30)
 do {

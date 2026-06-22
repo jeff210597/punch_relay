@@ -2,6 +2,7 @@ import sys
 import io
 import os
 import ctypes
+import atexit
 
 # 背景執行（工作排程器）時沒有終端機，將 stdout/stderr 導向 log 檔案
 # 同時解決 cp950 無法處理 emoji 的問題
@@ -83,6 +84,82 @@ PUNCH_URL = f"{EHR_BASE}/servlet/jform"
 FILE_PARAM = "hrm6p_edu.pkg,hrm6p.pkg,hrm6p_out_M1.pkg,hrm6fw_edu.pkg,hrm6bw.pkg,hrm6aw_edu.pkg,hrm6jw_edu.pkg,hrm6p_out_M21.pkg"
 
 DATA_FILE = "punch_data.json"
+
+RUNTIME_STATE_FILE = "bot_runtime_state.json"
+
+_previous_runtime_state = None
+_previous_run_unclean = False
+_runtime_started_at = None
+
+
+def _runtime_state_path():
+    return os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        RUNTIME_STATE_FILE
+    )
+
+
+def load_runtime_state():
+    """讀取上次 Bot 的執行狀態；壞掉或不存在時視為無紀錄。"""
+    path = _runtime_state_path()
+
+    try:
+        if not os.path.exists(path):
+            return None
+
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        return data if isinstance(data, dict) else None
+
+    except Exception as e:
+        print(f"⚠️ 讀取執行狀態檔失敗：{e}")
+        return None
+
+
+def save_runtime_state(state, reason=""):
+    """原子寫入狀態，避免電腦突然斷電時寫出半截 JSON。"""
+    path = _runtime_state_path()
+    temp_path = f"{path}.tmp"
+    payload = {
+        "state": state,
+        "reason": reason,
+        "pid": os.getpid(),
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+
+    try:
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, path)
+    except Exception as e:
+        print(f"⚠️ 寫入執行狀態檔失敗：{e}")
+
+
+def mark_runtime_started():
+    """只有真正取得單一執行個體後才呼叫。"""
+    global _previous_runtime_state, _previous_run_unclean, _runtime_started_at
+
+    _previous_runtime_state = load_runtime_state()
+    _previous_run_unclean = bool(
+        _previous_runtime_state
+        and _previous_runtime_state.get("state") == "running"
+    )
+    _runtime_started_at = datetime.now()
+    save_runtime_state("running", "bot process started")
+
+    if _previous_run_unclean:
+        print(
+            "⚠️ 偵測到上次執行未留下正常結束紀錄；"
+            "可能是斷電、強制關機、崩潰或 NSSM 強制重啟。"
+        )
+
+
+def mark_runtime_clean_exit():
+    """Python 正常離開時執行；斷電、os._exit、強制終止不會走到這裡。"""
+    save_runtime_state("clean_exit", "python exited normally")
 
 def validate_required_config():
     missing = []
@@ -3654,9 +3731,34 @@ async def discord_disconnect_watchdog():
             _log_file.flush()
             os._exit(3)
 
+_lifecycle_startup_notice_sent = False
+
+
+async def send_lifecycle_alert(message):
+    """直接送到管理員告警頻道，不使用一般打卡告警去重機制。"""
+    if ADMIN_ALERT_CHANNEL_ID <= 0:
+        print("⚠️ ADMIN_ALERT_CHANNEL_ID 未設定，無法發送 Bot 生命週期通知。")
+        return
+
+    try:
+        channel = client.get_channel(ADMIN_ALERT_CHANNEL_ID)
+        if channel is None:
+            channel = await client.fetch_channel(ADMIN_ALERT_CHANNEL_ID)
+        await channel.send(message)
+    except Exception as e:
+        print(f"⚠️ Bot 生命週期 Discord 通知失敗：{e}")
+
 @client.event
 async def on_ready():
-    global _auto_punch_started, _commands_synced, _discord_disconnected_at, _health_tasks_started
+    global _auto_punch_started
+    global _commands_synced
+    global _discord_disconnected_at
+    global _health_tasks_started
+    global _lifecycle_startup_notice_sent
+
+    was_disconnected = _discord_disconnected_at is not None
+    is_first_ready_of_this_process = not _lifecycle_startup_notice_sent
+
     _discord_disconnected_at = None
     # Only sync after first install or when restart_bot_resync.ps1 removes the flag.
     if not _commands_synced and not os.path.exists(SYNC_FLAG):
@@ -3674,6 +3776,36 @@ async def on_ready():
     print(f"✅ Bot 已啟動：{client.user}")
 
     # auto_punch_task 只在第一次 on_ready 時啟動，斷線重連不重複啟動
+    # 每個 Python 程序第一次成功連上 Discord 時通知一次。
+    if is_first_ready_of_this_process:
+        _lifecycle_startup_notice_sent = True
+        now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        if _previous_run_unclean:
+            previous_time = (
+                _previous_runtime_state.get("updated_at", "未知時間")
+                if _previous_runtime_state else "未知時間"
+            )
+            await send_lifecycle_alert(
+                "⚠️ **Punch Relay 已恢復運作，但偵測到上次可能非正常中斷**\n"
+                f"目前恢復時間：{now_text}\n"
+                f"上次狀態更新：{previous_time}\n"
+                "可能原因：電腦斷電、強制重開機、服務被強制停止、Python 崩潰，"
+                "或 NSSM 因異常而重啟。"
+            )
+        else:
+            await send_lifecycle_alert(
+                "✅ **Punch Relay 已成功啟動並連上 Discord**\n"
+                f"時間：{now_text}\n"
+                "NSSM 服務與 Bot 目前均已恢復運作。"
+            )
+    elif was_disconnected:
+        await send_lifecycle_alert(
+            "🔄 **Punch Relay Discord 連線已恢復**\n"
+            f"時間：{datetime.now():%Y-%m-%d %H:%M:%S}\n"
+            "可能是網路短暫中斷、電腦睡眠恢復，或 Discord 連線重新建立。"
+        )
+
     if not _auto_punch_started:
         _auto_punch_started = True
         client.loop.create_task(auto_punch_task(client))
@@ -3696,4 +3828,12 @@ async def on_disconnect():
 # reconnect=True（預設）讓 discord.py 自動重連，log_handler=None 避免重複設定
 if __name__ == "__main__":
     acquire_single_instance()
+
+    # 先讀上一次狀態，再標記本次程序正在執行。
+    mark_runtime_started()
+
+    # 正常結束時才會標記 clean_exit。
+    # 斷電、崩潰、os._exit()、被強制終止時不會執行，因此可被下次啟動偵測。
+    atexit.register(mark_runtime_clean_exit)
+
     client.run(DISCORD_TOKEN, reconnect=True, log_handler=None)
