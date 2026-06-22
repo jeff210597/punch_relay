@@ -491,6 +491,7 @@ def is_weekend(check_date):
 def get_today_schedule(user_data):
     today = date.today()
     yesterday = today - timedelta(days=1)
+    is_duty_after = is_duty_day(user_data, yesterday)
 
     if not user_data.get("empid"):
         return "尚未綁定帳號\n請使用 `/帳號綁定` 開始設定"
@@ -498,6 +499,17 @@ def get_today_schedule(user_data):
         return "⚠️ 自動打卡已關閉\n請使用 `/自動打卡恢復` 開啟"
     if is_auto_cancelled(user_data, today):
         return "⏸️ 今日已取消自動打卡（手動模式）\n請使用 `/打卡` 手動打卡"
+
+    # 昨日值班時，今天的主要打卡模式是「值班隔天」。即使今天是平日、
+    # 週末或休假，仍須完成昨日值班的下班卡，不能顯示一般日排程。
+    if is_duty_after:
+        h_duty, m_duty = DUTY_OUT_START[0], DUTY_OUT_START[1]
+        h_duty_e, m_duty_e = DUTY_OUT_END[0], DUTY_OUT_END[1]
+        return "\n".join([
+            "🌙 今日為值班隔天",
+            "不打上班卡",
+            f"⏰ {h_duty:02d}:{m_duty:02d}~{h_duty_e:02d}:{m_duty_e:02d} 自動打值班下班卡（昨日值班）",
+        ])
 
     if is_leave_day(user_data, today):
         return "🏖️ 今日為休假日\n不會自動打卡"
@@ -522,9 +534,6 @@ def get_today_schedule(user_data):
                 "自動打卡不啟動",
                 "若有值班請使用 `/值班新增` 或手動 `/打卡`"
             ]
-        if is_duty_day(user_data, yesterday):
-            lines.append("")
-            lines.append(f"⏰ {h_duty:02d}:{m_duty:02d}~{h_duty_e:02d}:{m_duty_e:02d} 自動打值班下班卡（昨日值班）")
         return "\n".join(lines)
 
     lines = []
@@ -536,10 +545,6 @@ def get_today_schedule(user_data):
         lines.append("🟢 今日為平日")
         lines.append(f"⏰ {h_in:02d}:{m_in:02d}~{h_in_e:02d}:{m_in_e:02d} 自動打上班卡")
         lines.append(f"⏰ {h_out:02d}:{m_out:02d}~{h_out_e:02d}:{m_out_e:02d} 自動打下班卡")
-
-    if is_duty_day(user_data, yesterday):
-        lines.append("")
-        lines.append(f"⏰ {h_duty:02d}:{m_duty:02d}~{h_duty_e:02d}:{m_duty_e:02d} 自動打值班下班卡（昨日值班）")
 
     return "\n".join(lines)
 
@@ -2270,7 +2275,9 @@ async def today_status(interaction: discord.Interaction):
     scheduled_duty = user_schedule.get("dutyout", "")
 
     # 今天是哪種模式
-    if is_weekend(today) and is_duty_day(user_data, today):
+    if is_duty_after:
+        lines.append("🌙 今日為值班隔天")
+    elif is_weekend(today) and is_duty_day(user_data, today):
         lines.append("🌙 今日為週末值班日")
     elif is_duty_day(user_data, today):
         lines.append("🌙 今日為值班日")
