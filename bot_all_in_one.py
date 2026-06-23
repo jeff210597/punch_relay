@@ -94,6 +94,7 @@ RUNTIME_STATE_PATH = os.path.join(
 _previous_runtime_state = None
 _previous_run_unclean = False
 _runtime_started_at = None
+_lifecycle_major_alert_pending = False
 
 
 def _runtime_state_path(path=RUNTIME_STATE_PATH):
@@ -143,12 +144,14 @@ def save_runtime_state(state, reason=""):
 def mark_runtime_started():
     """只有真正取得單一執行個體後才呼叫。"""
     global _previous_runtime_state, _previous_run_unclean, _runtime_started_at
+    global _lifecycle_major_alert_pending
 
     _previous_runtime_state = load_runtime_state()
     _previous_run_unclean = bool(
         _previous_runtime_state
         and _previous_runtime_state.get("state") == "running"
     )
+    _lifecycle_major_alert_pending = _previous_run_unclean
     _runtime_started_at = datetime.now()
     save_runtime_state("running", "bot process started")
 
@@ -566,6 +569,26 @@ def is_leave_day(user_data, check_date):
 
 def is_weekend(check_date):
     return check_date.weekday() >= 5
+
+def is_duty_after_day(user_data, check_date):
+    return is_duty_day(user_data, check_date - timedelta(days=1))
+
+def expects_regular_out_check(user_data, check_date):
+    return (
+        user_data.get("auto_punch", True)
+        and not is_auto_cancelled(user_data, check_date)
+        and not is_leave_day(user_data, check_date)
+        and not is_weekend(check_date)
+        and not is_duty_day(user_data, check_date)
+        and not is_duty_after_day(user_data, check_date)
+    )
+
+def expects_dutyout_check(user_data, check_date):
+    return (
+        user_data.get("auto_punch", True)
+        and not is_auto_cancelled(user_data, check_date)
+        and is_duty_after_day(user_data, check_date)
+    )
 
 def get_today_schedule(user_data):
     today = date.today()
@@ -1217,7 +1240,7 @@ async def auto_punch_task(client):
                     continue
                 if not ud_c.get("notify", {}).get("compare", True):
                     continue
-                if is_weekend(today) or is_duty_day(ud_c, today) or is_leave_day(ud_c, today):
+                if not expects_regular_out_check(ud_c, today):
                     continue
                 try:
                     def do_check(ep=empid_c, pw=password_c):
@@ -1279,7 +1302,7 @@ async def auto_punch_task(client):
                     continue
                 if not ud_c2.get("notify", {}).get("compare", True):
                     continue
-                if not is_duty_day(ud_c2, yesterday):
+                if not expects_dutyout_check(ud_c2, today):
                     continue
                 try:
                     def do_check2(ep=empid_c2, pw=password_c2):
@@ -1922,9 +1945,12 @@ async def new_user_punch_assessment(discord_user, uid_str, empid, password, user
     is_duty_today  = is_duty_day(user_data, today)
     is_leave_today = is_leave_day(user_data, today)
     is_wknd        = is_weekend(today)
+    is_cancelled_today = is_auto_cancelled(user_data, today)
 
     # ── 情境判斷 ──
     # 週末非值班、休假非值班隔天 → 不處理
+    if is_cancelled_today:
+        return
     if (is_wknd and not is_duty_today and not is_duty_after):
         return
     if (is_leave_today and not is_duty_after):
@@ -3296,8 +3322,10 @@ async def admin_verify_today(interaction: discord.Interaction):
         no_auto_expected = (
             not ud.get("auto_punch", True)
             or is_cancelled_today
-            or is_leave_today
-            or (is_weekend_today and not is_duty_today)
+            or (
+                (is_leave_today or (is_weekend_today and not is_duty_today))
+                and not expects_dutyout_check(ud, today)
+            )
         )
         schedule = user_schedule(uid)
         scheduled_in = schedule.get("in", "")
@@ -3738,6 +3766,13 @@ _lifecycle_startup_notice_sent = False
 
 async def send_lifecycle_alert(message):
     """直接送到管理員告警頻道，不使用一般打卡告警去重機制。"""
+    global _lifecycle_major_alert_pending
+
+    if not _lifecycle_major_alert_pending:
+        print("Suppressed non-critical Punch Relay lifecycle admin alert.")
+        return
+    _lifecycle_major_alert_pending = False
+
     if ADMIN_ALERT_CHANNEL_ID <= 0:
         print("⚠️ ADMIN_ALERT_CHANNEL_ID 未設定，無法發送 Bot 生命週期通知。")
         return
