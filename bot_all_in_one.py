@@ -151,7 +151,7 @@ def mark_runtime_started():
         _previous_runtime_state
         and _previous_runtime_state.get("state") == "running"
     )
-    _lifecycle_major_alert_pending = _previous_run_unclean
+    _lifecycle_major_alert_pending = False
     _runtime_started_at = datetime.now()
     save_runtime_state("running", "bot process started")
 
@@ -4194,6 +4194,11 @@ _lifecycle_startup_notice_sent = False
 async def send_lifecycle_alert(message):
     """直接送到管理員告警頻道，不使用一般打卡告警去重機制。"""
     global _lifecycle_major_alert_pending
+
+    print("Lifecycle Discord admin alert disabled; message logged only.")
+    print(message)
+    _lifecycle_major_alert_pending = False
+    return
 
     if not _lifecycle_major_alert_pending:
         print("Suppressed non-critical Punch Relay lifecycle admin alert.")
