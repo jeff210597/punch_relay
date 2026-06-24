@@ -373,6 +373,80 @@ def format_month_schedule_summary(user_data, target_month_key):
     leave_text = ", ".join(leave_days) if leave_days else "尚未設定"
     return f"值班：{duty_text}\n休假：{leave_text}"
 
+def remove_month_dates(user_data, field, target_month_key):
+    user_data[field] = [
+        value for value in user_data.get(field, [])
+        if not value.startswith(f"{target_month_key}-")
+    ]
+
+def apply_next_month_settings(user_data, duty_dates=None, leave_dates=None, no_special_days=False, source="next_month_settings"):
+    target_month_date = first_day_of_next_month()
+    target_month_key = month_key(target_month_date)
+    duty_dates = (duty_dates or "").strip()
+    leave_dates = (leave_dates or "").strip()
+
+    if no_special_days and (duty_dates or leave_dates):
+        return {
+            "success": False,
+            "message": "請擇一：選擇「無值班無休假」時，不要同時填值班或休假日期。",
+            "target_month": target_month_key,
+        }
+    if not no_special_days and not duty_dates and not leave_dates:
+        return {
+            "success": False,
+            "message": "請選擇「無值班無休假」，或填入下月值班/休假日期。",
+            "target_month": target_month_key,
+        }
+
+    parsed_duty, failed_duty = ([], [])
+    parsed_leave, failed_leave = ([], [])
+    if duty_dates:
+        parsed_duty, failed_duty = parse_date_tokens(duty_dates, target_month_date.month)
+    if leave_dates:
+        parsed_leave, failed_leave = parse_date_tokens(leave_dates, target_month_date.month)
+
+    failed = []
+    failed.extend([f"值班 {item}" for item in failed_duty])
+    failed.extend([f"休假 {item}" for item in failed_leave])
+    if failed:
+        return {
+            "success": False,
+            "message": f"日期格式有誤：{', '.join(failed)}",
+            "target_month": target_month_key,
+        }
+
+    user_data.setdefault("duty_days", [])
+    user_data.setdefault("leave_dates", [])
+    if no_special_days:
+        remove_month_dates(user_data, "duty_days", target_month_key)
+        remove_month_dates(user_data, "leave_dates", target_month_key)
+        source = f"{source}_no_special_days"
+    else:
+        if duty_dates:
+            remove_month_dates(user_data, "duty_days", target_month_key)
+            for date_str, _display, _dt in parsed_duty:
+                if date_str not in user_data["duty_days"]:
+                    user_data["duty_days"].append(date_str)
+        if leave_dates:
+            remove_month_dates(user_data, "leave_dates", target_month_key)
+            for date_str, _display, _dt in parsed_leave:
+                if date_str not in user_data["leave_dates"]:
+                    user_data["leave_dates"].append(date_str)
+
+    user_data["duty_days"] = sorted(user_data.get("duty_days", []))
+    user_data["leave_dates"] = sorted(user_data.get("leave_dates", []))
+    mark_monthly_auto_confirmed(user_data, target_month_key, source)
+
+    duty_added = [display for _date_str, display, _dt in parsed_duty]
+    leave_added = [display for _date_str, display, _dt in parsed_leave]
+    return {
+        "success": True,
+        "target_month": target_month_key,
+        "duty_added": duty_added,
+        "leave_added": leave_added,
+        "summary": format_month_schedule_summary(user_data, target_month_key),
+    }
+
 def build_monthly_binding_admin_summary(data, target_month_key):
     completed = []
     missing = []
@@ -389,7 +463,7 @@ def build_monthly_binding_admin_summary(data, target_month_key):
             completed.append(f"✅ {line}：已完成（{source}）")
         else:
             missing.append(f"❌ {line}：未完成")
-    lines = [f"📋 **{target_month_key} 下月綁定完成狀態**"]
+    lines = [f"📋 **{target_month_key} 下月設定完成狀態**"]
     lines.append("")
     lines.append("**已完成**")
     lines.extend(completed or ["（無）"])
@@ -1025,7 +1099,7 @@ async def auto_punch_task(client):
                         ud_month["auto_punch"] = False
                         ud_month["auto_punch_disabled_reason"] = reason
                         changed_monthly = True
-                        print(f"📅 {uid_month} 未完成 {month_key(today)} 下月綁定確認，已關閉自動打卡")
+                        print(f"📅 {uid_month} 未完成 {month_key(today)} 下月設定，已關閉自動打卡")
             if changed_monthly:
                 save_data(data)
 
@@ -1041,22 +1115,23 @@ async def auto_punch_task(client):
                     continue
                 reminder_changed = True
                 reminder_msg = (
-                    f"📌 **下月綁定提醒**\n"
-                    f"請在月底前確認 **{target_month}** 是否繼續使用自動打卡。\n\n"
+                    f"📌 **下月設定提醒**\n"
+                    f"請在月底前完成 **{target_month}** 下月設定，確認是否繼續使用自動打卡。\n\n"
                     "完成方式：\n"
-                    "1. 使用 `/下月綁定`\n"
-                    "2. 使用 `/值班設定` 或 `/休假設定` 並把 `月份` 設為下個月\n\n"
+                    "1. 直接按下面的「下月無值班無休假」\n"
+                    "2. 按「填寫下月設定」輸入下月值班/休假\n"
+                    "3. 或使用 `/下月設定`\n\n"
                     f"{format_month_schedule_summary(ud_remind, target_month)}\n\n"
                     "若月底前未完成，下個月 1 號會自動關閉自動打卡。"
                 )
                 try:
                     remind_user = client.get_user(int(uid_remind)) or await client.fetch_user(int(uid_remind))
-                    await remind_user.send(reminder_msg)
+                    await remind_user.send(reminder_msg, view=NextMonthReminderView(uid_remind))
                 except Exception as e:
-                    print(f"下月綁定提醒私訊失敗 {uid_remind}：{e}")
+                    print(f"下月設定提醒私訊失敗 {uid_remind}：{e}")
                 await send_admin_channel_message(
                     client,
-                    f"📌 下月綁定提醒已發送：<@{uid_remind}>（{ud_remind.get('empid')}）→ {target_month}"
+                    f"📌 下月設定提醒已發送：<@{uid_remind}>（{ud_remind.get('empid')}）→ {target_month}"
                 )
             if reminder_changed:
                 save_data(data)
@@ -2120,6 +2195,94 @@ class MakeupPunchView(discord.ui.View):
         except Exception:
             pass
 
+class NextMonthSettingsModal(discord.ui.Modal, title='下月設定'):
+    duty_dates = discord.ui.TextInput(
+        label='下月值班日期',
+        placeholder='例如：1 3 5，沒有可留空',
+        required=False,
+        style=discord.TextStyle.short,
+    )
+    leave_dates = discord.ui.TextInput(
+        label='下月休假日期',
+        placeholder='例如：10 11，沒有可留空',
+        required=False,
+        style=discord.TextStyle.short,
+    )
+
+    def __init__(self, uid):
+        super().__init__()
+        self.uid = str(uid)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if str(interaction.user.id) != self.uid:
+            await interaction.response.send_message("這不是你的下月設定提醒。", ephemeral=True)
+            return
+        user_data = get_user_data(self.uid)
+        if not user_data.get("empid") or not user_data.get("password"):
+            await interaction.response.send_message("請先使用 `/帳號綁定` 綁定 e-HR 帳號。", ephemeral=True)
+            return
+        result = apply_next_month_settings(
+            user_data,
+            duty_dates=str(self.duty_dates.value or ""),
+            leave_dates=str(self.leave_dates.value or ""),
+            no_special_days=False,
+            source="next_month_reminder_modal",
+        )
+        if not result.get("success"):
+            await interaction.response.send_message(result.get("message", "下月設定未完成。"), ephemeral=True)
+            return
+        save_user_data(self.uid, user_data)
+        embed = discord.Embed(
+            title="✅ 下月設定已完成",
+            description=f"已確認 **{result['target_month']}** 繼續使用自動打卡。\n\n{result['summary']}",
+            color=0x00ff00,
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+class NextMonthReminderView(discord.ui.View):
+    def __init__(self, uid):
+        super().__init__(timeout=432000)
+        self.uid = str(uid)
+
+    def _disable_all(self):
+        for item in self.children:
+            item.disabled = True
+
+    @discord.ui.button(label='下月無值班無休假', style=discord.ButtonStyle.success)
+    async def no_special_days(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if str(interaction.user.id) != self.uid:
+            await interaction.response.send_message("這不是你的下月設定提醒。", ephemeral=True)
+            return
+        user_data = get_user_data(self.uid)
+        if not user_data.get("empid") or not user_data.get("password"):
+            await interaction.response.send_message("請先使用 `/帳號綁定` 綁定 e-HR 帳號。", ephemeral=True)
+            return
+        result = apply_next_month_settings(
+            user_data,
+            no_special_days=True,
+            source="next_month_reminder_button",
+        )
+        if not result.get("success"):
+            await interaction.response.send_message(result.get("message", "下月設定未完成。"), ephemeral=True)
+            return
+        save_user_data(self.uid, user_data)
+        self._disable_all()
+        await interaction.response.edit_message(
+            content=(
+                f"✅ **下月設定已完成**\n"
+                f"已確認 **{result['target_month']}** 繼續使用自動打卡。\n\n"
+                f"{result['summary']}"
+            ),
+            view=self,
+        )
+
+    @discord.ui.button(label='填寫下月設定', style=discord.ButtonStyle.primary)
+    async def open_settings_modal(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if str(interaction.user.id) != self.uid:
+            await interaction.response.send_message("這不是你的下月設定提醒。", ephemeral=True)
+            return
+        await interaction.response.send_modal(NextMonthSettingsModal(self.uid))
+
 # ── 手動打卡 ──
 class PunchModal(discord.ui.Modal, title='打卡系統'):
     username = discord.ui.TextInput(label='員工編號', placeholder='請輸入員工編號', required=True)
@@ -2427,8 +2590,18 @@ async def unbind_command(interaction: discord.Interaction):
     embed = discord.Embed(title="✅ 已解除綁定", description="帳號已解除，自動打卡停止", color=0xffaa00)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@tree.command(name="下月綁定", description="確認下個月繼續使用自動打卡")
-async def confirm_next_month_binding(interaction: discord.Interaction):
+@tree.command(name="下月設定", description="設定下個月是否繼續自動打卡與休假值班日")
+@app_commands.describe(
+    無值班無休假="下個月沒有值班也沒有休假，仍繼續自動打卡",
+    值班日期="下個月值班日期，例如：1 3 5",
+    休假日期="下個月休假日期，例如：10 11",
+)
+async def next_month_settings(
+    interaction: discord.Interaction,
+    無值班無休假: bool = False,
+    值班日期: str = None,
+    休假日期: str = None,
+):
     user_data = get_user_data(interaction.user.id)
     if not user_data.get("empid") or not user_data.get("password"):
         embed = discord.Embed(
@@ -2438,14 +2611,27 @@ async def confirm_next_month_binding(interaction: discord.Interaction):
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
-    target_month = month_key_for_next_month()
-    mark_monthly_auto_confirmed(user_data, target_month, "next_month_bind")
+    result = apply_next_month_settings(
+        user_data,
+        duty_dates=值班日期,
+        leave_dates=休假日期,
+        no_special_days=無值班無休假,
+        source="next_month_settings",
+    )
+    if not result.get("success"):
+        embed = discord.Embed(
+            title="❌ 下月設定未完成",
+            description=result.get("message", "請確認輸入內容。"),
+            color=0xff0000,
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
     save_user_data(interaction.user.id, user_data)
     embed = discord.Embed(
-        title="✅ 下月綁定已完成",
+        title="✅ 下月設定已完成",
         description=(
-            f"已確認 **{target_month}** 繼續使用自動打卡。\n\n"
-            f"{format_month_schedule_summary(user_data, target_month)}"
+            f"已確認 **{result['target_month']}** 繼續使用自動打卡。\n\n"
+            f"{result['summary']}"
         ),
         color=0x00ff00,
     )
@@ -2798,7 +2984,7 @@ async def duty_leave_list(interaction: discord.Interaction):
     next_month_done = is_monthly_auto_confirmed(user_data, next_month_str)
 
     lines = []
-    lines.append(f"**{next_month_str} 下月綁定：{'✅ 已完成' if next_month_done else '❌ 未完成'}**")
+    lines.append(f"**{next_month_str} 下月設定：{'✅ 已完成' if next_month_done else '❌ 未完成'}**")
     lines.append(format_month_schedule_summary(user_data, next_month_str))
     lines.append("")
 
@@ -3225,10 +3411,21 @@ async def admin_add_leave(interaction: discord.Interaction, 使用者: discord.U
 async def admin_cancel_leave(interaction: discord.Interaction, 使用者: discord.User, 日期: str, 月份: int = None):
     await admin_update_dates(interaction, 使用者, 日期, "leave", "remove", 月份)
 
-@admin_group.command(name="下月綁定", description="管理員替指定使用者確認下個月繼續自動打卡")
+@admin_group.command(name="下月設定", description="管理員替指定使用者設定下個月自動打卡與休假值班日")
 @app_commands.default_permissions(administrator=True)
-@app_commands.describe(使用者="要確認下月綁定的 Discord 使用者")
-async def admin_confirm_next_month_binding(interaction: discord.Interaction, 使用者: discord.User):
+@app_commands.describe(
+    使用者="要設定的 Discord 使用者",
+    無值班無休假="下個月沒有值班也沒有休假，仍繼續自動打卡",
+    值班日期="下個月值班日期，例如：1 3 5",
+    休假日期="下個月休假日期，例如：10 11",
+)
+async def admin_next_month_settings(
+    interaction: discord.Interaction,
+    使用者: discord.User,
+    無值班無休假: bool = False,
+    值班日期: str = None,
+    休假日期: str = None,
+):
     if await reject_non_admin(interaction):
         return
     user_data = get_user_data(使用者.id)
@@ -3240,15 +3437,28 @@ async def admin_confirm_next_month_binding(interaction: discord.Interaction, 使
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
-    target_month = month_key_for_next_month()
-    mark_monthly_auto_confirmed(user_data, target_month, "admin_next_month_bind")
+    result = apply_next_month_settings(
+        user_data,
+        duty_dates=值班日期,
+        leave_dates=休假日期,
+        no_special_days=無值班無休假,
+        source="admin_next_month_settings",
+    )
+    if not result.get("success"):
+        embed = discord.Embed(
+            title="❌ 下月設定未完成",
+            description=f"對象：{使用者.mention}\n{result.get('message', '請確認輸入內容。')}",
+            color=0xff0000,
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
     save_user_data(使用者.id, user_data)
     embed = discord.Embed(
-        title="✅ 下月綁定已完成",
+        title="✅ 下月設定已完成",
         description=(
             f"對象：{使用者.mention}\n"
-            f"已確認 **{target_month}** 繼續使用自動打卡。\n\n"
-            f"{format_month_schedule_summary(user_data, target_month)}"
+            f"已確認 **{result['target_month']}** 繼續使用自動打卡。\n\n"
+            f"{result['summary']}"
         ),
         color=0x00ff00,
     )
@@ -3405,7 +3615,7 @@ async def admin_query(interaction: discord.Interaction):
             + "\n".join(today_lines) + "\n"
             f"　**本月值班**（{len(month_duties)} 天）：{duty_detail}\n"
             f"　**本月休假**（{len(month_leaves)} 天）：{leave_detail}\n"
-            f"　**{next_month_str} 下月綁定**：{next_month_done}"
+            f"　**{next_month_str} 下月設定**：{next_month_done}"
         )
     embed = discord.Embed(
         title=f"📋 所有綁定使用者（共 {len(lines)} 人）｜{today_str}",
@@ -3713,7 +3923,7 @@ async def help_command(interaction: discord.Interaction):
     )
     embed.add_field(
         name="👤 帳號設定",
-        value="`/帳號綁定` — 綁定員工編號+密碼，開啟自動打卡\n　　　　　　綁定後自動評估當天打卡狀況：\n　　　　　　• 排程時間已過且 e-HR 無記錄 → 私訊補打按鈕\n　　　　　　• 超過 08:00 未打上班卡 → 私訊告知（不補打，避免遲到）\n　　　　　　• 排程時間未到 → 等待自動打卡，不另通知\n`/下月綁定` — 確認下個月繼續自動打卡\n`/帳號解除` — 取消綁定，停止自動打卡",
+        value="`/帳號綁定` — 綁定員工編號+密碼，開啟自動打卡\n　　　　　　綁定後自動評估當天打卡狀況：\n　　　　　　• 排程時間已過且 e-HR 無記錄 → 私訊補打按鈕\n　　　　　　• 超過 08:00 未打上班卡 → 私訊告知（不補打，避免遲到）\n　　　　　　• 排程時間未到 → 等待自動打卡，不另通知\n`/下月設定` — 設定下個月繼續自動打卡、值班與休假\n`/帳號解除` — 取消綁定，停止自動打卡",
         inline=False
     )
     if is_admin_user(interaction.user.id):
@@ -3724,18 +3934,27 @@ async def help_command(interaction: discord.Interaction):
                 "`/管理 今日打卡驗證` — 查詢所有綁定使用者今日 e-HR 實際刷卡紀錄\n"
                 "`/管理 綁定`、`/管理 解除綁定` — 代替指定使用者管理帳號\n"
                 "`/管理 恢復自動打卡` — 替指定使用者移除今日取消設定\n"
-                "`/管理 下月綁定` — 替指定使用者確認下個月繼續自動打卡\n"
+                "`/管理 下月設定` — 替指定使用者設定下個月繼續自動打卡、值班與休假\n"
                 "`/管理 值班設定/新增/取消`、`/管理 休假設定/新增/取消` — 代替指定使用者調整日期"
             ),
             inline=False
         )
+    embed.add_field(
+        name="📌 下月設定",
+        value=(
+            "`/下月設定 無值班無休假:True` — 下個月沒有值班/休假，仍繼續自動打卡\n"
+            "`/下月設定 值班日期:1 3 5 休假日期:10 11` — 一次設定下月值班與休假\n"
+            "月底提醒也會提供按鈕，可直接選「下月無值班無休假」或填寫下月設定。"
+        ),
+        inline=False
+    )
     embed.add_field(
         name="📅 值班設定",
         value=(
             "`/值班設定 月份:7 日期:1 3 5` — **重設**指定月份值班\n"
             "`/值班新增 月份:7 日期:6 8` — **追加**值班日，不影響同月現有設定\n"
             "`/值班取消 月份:7 日期:1` — 取消指定月份的值班設定\n"
-            "月底前設定下個月值班日，會自動視為完成下月綁定。"
+            "月底前設定下個月值班日，會自動視為完成下月設定。"
         ),
         inline=False
     )
@@ -3746,7 +3965,7 @@ async def help_command(interaction: discord.Interaction):
             "（若前一天是值班日，仍會打值班下班卡）\n"
             "`/休假新增 月份:7 日期:12` — **追加**休假日，不影響同月現有設定\n"
             "`/休假取消 月份:7 日期:10` — 取消指定月份的休假設定\n"
-            "月底前設定下個月休假日，會自動視為完成下月綁定。"
+            "月底前設定下個月休假日，會自動視為完成下月設定。"
         ),
         inline=False
     )
@@ -3777,8 +3996,8 @@ async def help_command(interaction: discord.Interaction):
             "　完全無記錄 → 通知「未偵測到打卡」+ 補打按鈕\n\n"
             "**④ 月底摘要**（每月最後一天 22:00）\n"
             "　本月所有打卡記錄摘要，方便核對\n\n"
-            "**⑤ 下月綁定提醒**（月底前五天每天 08:00）\n"
-            "　未完成下月綁定者會收到私訊提醒；完成後不再提醒\n"
+            "**⑤ 下月設定提醒**（月底前五天每天 08:00）\n"
+            "　未完成下月設定者會收到私訊提醒；完成後不再提醒\n"
             "　每月最後一天 09:00 會發送完成/未完成名單給管理員\n\n"
             "**⑥ 補打按鈕通知**（不受通知設定影響，永遠發送）\n"
             "　以下情況會私訊發送補打確認按鈕：\n"
