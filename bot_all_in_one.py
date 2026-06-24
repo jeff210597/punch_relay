@@ -3069,7 +3069,7 @@ async def duty_leave_list(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # ── 查詢打卡記錄 ──
-@tree.command(name="查詢本日打卡記錄", description="查詢今天的 e-HR 刷卡記錄（未綁定者請填入員工編號和密碼）")
+@tree.command(name="查詢本日e-hr刷卡記錄", description="查詢今天的 e-HR 刷卡記錄（未綁定者請填入員工編號和密碼）")
 @app_commands.describe(
     員工編號="未綁定帳號時填入（已綁定者可不填）",
     密碼="未綁定帳號時填入（已綁定者可不填）"
@@ -3099,8 +3099,8 @@ async def query_punch_record(interaction: discord.Interaction, 員工編號: str
             title="❌ 需要帳號密碼",
             description=(
                 "請使用以下方式之一查詢：\n\n"
-                "1️⃣ **已綁定帳號**：直接輸入 `/查詢本日打卡記錄` 即可\n"
-                "2️⃣ **未綁定帳號**：輸入 `/查詢本日打卡記錄 員工編號:12345 密碼:yourpass`"
+                "1️⃣ **已綁定帳號**：直接輸入 `/查詢本日e-hr刷卡記錄` 即可\n"
+                "2️⃣ **未綁定帳號**：輸入 `/查詢本日e-hr刷卡記錄 員工編號:12345 密碼:yourpass`"
             ),
             color=0xffaa00
         )
@@ -3255,7 +3255,7 @@ async def query_punch_record(interaction: discord.Interaction, 員工編號: str
         await interaction.followup.send(embed=embed, ephemeral=True)
 
 # ── 本月人資系統打卡紀錄（手動查詢版）──
-@tree.command(name="查詢本月上下班紀錄", description="查詢本月 e-HR 紀錄的上下班時間，未綁定者可輸入員工編號和密碼查詢")
+@tree.command(name="查詢本月e-hr刷出卡紀錄", description="查詢本月 e-HR 紀錄的上下班時間，未綁定者可輸入員工編號和密碼查詢")
 @app_commands.describe(
     員工編號="未綁定帳號時填入（已綁定者可不填）",
     密碼="未綁定帳號時填入（已綁定者可不填）"
@@ -3270,8 +3270,8 @@ async def monthly_summary_command(interaction: discord.Interaction, 員工編號
             title="❌ 需要帳號密碼",
             description=(
                 "請使用以下方式之一查詢：\n\n"
-                "1️⃣ **已綁定帳號**：直接輸入 `/查詢本月上下班紀錄` 即可\n"
-                "2️⃣ **未綁定帳號**：輸入 `/查詢本月上下班紀錄 員工編號:12345 密碼:yourpass`"
+                "1️⃣ **已綁定帳號**：直接輸入 `/查詢本月e-hr刷出卡紀錄` 即可\n"
+                "2️⃣ **未綁定帳號**：輸入 `/查詢本月e-hr刷出卡紀錄 員工編號:12345 密碼:yourpass`"
             ),
             color=0xffaa00
         )
@@ -4021,9 +4021,9 @@ async def help_command(interaction: discord.Interaction):
         name="🔍 查詢功能",
         value=(
             "`/查今日狀態` — 查看今天的打卡模式、Bot 排程時間，以及與 e-HR 記錄的比對結果\n"
-            "`/查詢本日打卡記錄` — 直接查詢今天 e-HR 系統的刷卡記錄（未綁定者可輸入帳號密碼）\n"
-            "`/查詢本月打卡時間` — 查看整個月每天的打卡設定一覽\n"
-            "`/查詢本月上下班紀錄` — 查詢本月 e-HR 紀錄的上下班時間（未綁定者可輸入帳號密碼；月底也會自動私訊發送）\n"
+            "`/查詢本日e-hr刷卡記錄` — 直接查詢今天 e-HR 系統的刷卡記錄（未綁定者可輸入帳號密碼）\n"
+            "`/查詢本月bot打卡排程` — 查看整個月每天的打卡設定一覽\n"
+            "`/查詢本月e-hr刷出卡紀錄` — 查詢本月 e-HR 紀錄的上下班時間（未綁定者可輸入帳號密碼；月底也會自動私訊發送）\n"
             "`/查詢值班休假日程` — 查看本月、下月、後續月份值班休假與下月設定狀態\n"
             "`/說明` — 顯示此說明頁面"
         ),
@@ -4033,7 +4033,7 @@ async def help_command(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # ── 查詢本月自動打卡時間 ──
-@tree.command(name="查詢本月打卡時間", description="查看整個月的打卡設定一覽")
+@tree.command(name="查詢本月bot打卡排程", description="查看整個月的打卡設定一覽")
 async def monthly_status(interaction: discord.Interaction):
     user_data = get_user_data(interaction.user.id)
 
