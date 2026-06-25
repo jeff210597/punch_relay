@@ -2285,19 +2285,20 @@ class NextMonthSettingsModal(discord.ui.Modal, title='下月設定'):
         style=discord.TextStyle.short,
     )
 
-    def __init__(self, target_uid, actor_uid=None, target_label=None, source="next_month_settings_modal"):
+    def __init__(self, target_uid, actor_uid=None, target_label=None, source="next_month_settings_modal", require_binding=True):
         super().__init__()
         self.target_uid = str(target_uid)
         self.actor_uid = str(actor_uid or target_uid)
         self.target_label = target_label
         self.source = source
+        self.require_binding = require_binding
 
     async def on_submit(self, interaction: discord.Interaction):
         if str(interaction.user.id) != self.actor_uid:
             await interaction.response.send_message("這個下月設定按鈕不是給你操作的。", ephemeral=True)
             return
         user_data = get_user_data(self.target_uid)
-        if not user_data.get("empid") or not user_data.get("password"):
+        if self.require_binding and (not user_data.get("empid") or not user_data.get("password")):
             await interaction.response.send_message("請先使用 `/帳號綁定` 綁定 e-HR 帳號。", ephemeral=True)
             return
         result = apply_next_month_settings(
@@ -2320,12 +2321,13 @@ class NextMonthSettingsModal(discord.ui.Modal, title='下月設定'):
         )
 
 class NextMonthReminderView(discord.ui.View):
-    def __init__(self, target_uid, actor_uid=None, target_label=None, source="next_month_settings"):
+    def __init__(self, target_uid, actor_uid=None, target_label=None, source="next_month_settings", require_binding=True):
         super().__init__(timeout=432000)
         self.target_uid = str(target_uid)
         self.actor_uid = str(actor_uid or target_uid)
         self.target_label = target_label
         self.source = source
+        self.require_binding = require_binding
 
     def _disable_all(self):
         for item in self.children:
@@ -2337,7 +2339,7 @@ class NextMonthReminderView(discord.ui.View):
             await interaction.response.send_message("這個下月設定按鈕不是給你操作的。", ephemeral=True)
             return
         user_data = get_user_data(self.target_uid)
-        if not user_data.get("empid") or not user_data.get("password"):
+        if self.require_binding and (not user_data.get("empid") or not user_data.get("password")):
             await interaction.response.send_message("請先使用 `/帳號綁定` 綁定 e-HR 帳號。", ephemeral=True)
             return
         result = apply_next_month_settings(
@@ -2375,6 +2377,7 @@ class NextMonthReminderView(discord.ui.View):
                 actor_uid=self.actor_uid,
                 target_label=self.target_label,
                 source=f"{self.source}_modal",
+                require_binding=self.require_binding,
             )
         )
 
@@ -3469,14 +3472,6 @@ async def admin_next_month_settings(interaction: discord.Interaction, 使用者:
     if await reject_non_admin(interaction):
         return
     user_data = get_user_data(使用者.id)
-    if not user_data.get("empid") or not user_data.get("password"):
-        embed = discord.Embed(
-            title="❌ 尚未綁定帳號",
-            description=f"對象：{使用者.mention}\n請先完成帳號綁定。",
-            color=0xff0000,
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        return
     target_month = month_key_for_next_month()
     embed = discord.Embed(
         title="📌 下月設定",
@@ -3496,6 +3491,7 @@ async def admin_next_month_settings(interaction: discord.Interaction, 使用者:
             actor_uid=interaction.user.id,
             target_label=使用者.mention,
             source="admin_next_month_settings",
+            require_binding=False,
         ),
         ephemeral=True,
     )
