@@ -2260,6 +2260,17 @@ class MakeupPunchView(discord.ui.View):
         except Exception:
             pass
 
+def build_next_month_settings_complete_embed(result, target_label=None):
+    target_line = f"對象：{target_label}\n" if target_label else ""
+    return discord.Embed(
+        title="✅ 下月設定已完成",
+        description=(
+            f"{target_line}已確認 **{result['target_month']}** 繼續使用自動打卡。\n\n"
+            f"{result['summary']}"
+        ),
+        color=0x00ff00,
+    )
+
 class NextMonthSettingsModal(discord.ui.Modal, title='下月設定'):
     duty_dates = discord.ui.TextInput(
         label='下月值班日期',
@@ -2303,13 +2314,10 @@ class NextMonthSettingsModal(discord.ui.Modal, title='下月設定'):
             )
             return
         save_user_data(self.target_uid, user_data)
-        target_line = f"對象：{self.target_label}\n" if self.target_label else ""
-        embed = discord.Embed(
-            title="✅ 下月設定已完成",
-            description=f"{target_line}已確認 **{result['target_month']}** 繼續使用自動打卡。\n\n{result['summary']}",
-            color=0x00ff00,
+        await interaction.response.send_message(
+            embed=build_next_month_settings_complete_embed(result, self.target_label),
+            ephemeral=True,
         )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 class NextMonthReminderView(discord.ui.View):
     def __init__(self, target_uid, actor_uid=None, target_label=None, source="next_month_settings"):
@@ -2350,6 +2358,10 @@ class NextMonthReminderView(discord.ui.View):
                 f"{result['summary']}"
             ),
             view=self,
+        )
+        await interaction.followup.send(
+            embed=build_next_month_settings_complete_embed(result, self.target_label),
+            ephemeral=True,
         )
 
     @discord.ui.button(label='否，我要填值班/休假', style=discord.ButtonStyle.primary)
