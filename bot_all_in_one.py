@@ -4240,7 +4240,8 @@ def build_bot_schedule_embeds(user_data, uid, target_month_date):
 
         if date_str in leave_dates:
             if has_duty_yesterday:
-                lines.append(f"{prefix}`{day_label}` 🏖️休假＋值班下班" + (" ✅" if is_past and not is_today else ""))
+                lines.append(f"{prefix}`{day_label}` 🏖️ 休假" + (" ✅" if is_past and not is_today else ""))
+                lines.append("　　　　　　🌅 值班隔天")
                 if not is_past or is_today:
                     lines.append(f"　　　　　　⏰ 值班下班：{time_duty if is_today else default_duty}")
             else:
@@ -4253,14 +4254,15 @@ def build_bot_schedule_embeds(user_data, uid, target_month_date):
                 lines.append(f"　　　　　　⏰ 上班：{time_in if is_today else default_in}")
         elif d.weekday() >= 5:
             if has_duty_yesterday:
-                lines.append(f"{prefix}`{day_label}` 📴週末＋值班下班" + (" ✅" if is_past and not is_today else ""))
+                lines.append(f"{prefix}`{day_label}` 📴 週末" + (" ✅" if is_past and not is_today else ""))
+                lines.append("　　　　　　🌅 值班隔天")
                 if not is_past or is_today:
                     lines.append(f"　　　　　　⏰ 值班下班：{time_duty if is_today else default_duty}")
             else:
                 lines.append(f"{prefix}`{day_label}` 📴 週末")
         else:
             if has_duty_yesterday:
-                label = "🟢 平日（值班隔天）"
+                label = "🌅 值班隔天"
                 lines.append(f"{prefix}`{day_label}` {label}" + (" ✅" if is_past and not is_today else ""))
                 if not is_past or is_today:
                     lines.append(f"　　　　　　⏰ 值班下班：{time_duty if is_today else default_duty}")
@@ -4285,7 +4287,7 @@ def build_bot_schedule_embeds(user_data, uid, target_month_date):
         description="\n".join(lines[mid:]) or "（無資料）",
         color=0x5865F2,
     )
-    embed2.set_footer(text="🟢平日　🌙值班　🏖️休假　⏸️取消自動　📴週末　✅已過")
+    embed2.set_footer(text="🟢平日　🌙值班　🌅值班隔天　🏖️休假　⏸️取消自動　📴週末　✅已過")
     return [embed1, embed2]
 
 class BotScheduleMonthView(discord.ui.View):
