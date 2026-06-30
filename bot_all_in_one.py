@@ -1211,7 +1211,7 @@ async def auto_punch_task(client):
                     remind_user = client.get_user(int(uid_remind)) or await client.fetch_user(int(uid_remind))
                     await remind_user.send(
                         reminder_msg,
-                        view=NextMonthReminderView(uid_remind, source="next_month_reminder"),
+                        view=PersistentNextMonthReminderView(),
                     )
                 except Exception as e:
                     print(f"下月設定提醒私訊失敗 {uid_remind}：{e}")
@@ -2521,6 +2521,59 @@ class NextMonthReminderView(discord.ui.View):
             )
         )
 
+class PersistentNextMonthReminderView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label='是，下月無值班無休假',
+        style=discord.ButtonStyle.success,
+        custom_id="next_month:no_special_days",
+    )
+    async def no_special_days(self, interaction: discord.Interaction, button: discord.ui.Button):
+        target_uid = str(interaction.user.id)
+        user_data = get_user_data(target_uid)
+        if not user_data.get("empid") or not user_data.get("password"):
+            await interaction.response.send_message("請先使用 `/帳號綁定` 綁定 e-HR 帳號。", ephemeral=True)
+            return
+        result = apply_next_month_settings(
+            user_data,
+            no_special_days=True,
+            source="persistent_next_month_settings_button",
+        )
+        if not result.get("success"):
+            await interaction.response.send_message(result.get("message", "下月設定未完成。"), ephemeral=True)
+            return
+        save_user_data(target_uid, user_data)
+        await interaction.response.edit_message(
+            content=(
+                f"✅ **下月設定已完成**\n"
+                f"已確認 **{result['target_month']}** 繼續使用自動打卡。\n\n"
+                f"{result['summary']}"
+            ),
+            view=None,
+        )
+        await interaction.followup.send(
+            embed=build_next_month_settings_complete_embed(result),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(
+        label='否，我要填值班/休假',
+        style=discord.ButtonStyle.primary,
+        custom_id="next_month:open_modal",
+    )
+    async def open_settings_modal(self, interaction: discord.Interaction, button: discord.ui.Button):
+        target_uid = str(interaction.user.id)
+        await interaction.response.send_modal(
+            NextMonthSettingsModal(
+                target_uid=target_uid,
+                actor_uid=target_uid,
+                source="persistent_next_month_settings_modal",
+                require_binding=True,
+            )
+        )
+
 # ── 手動打卡 ──
 class PunchModal(discord.ui.Modal, title='打卡系統'):
     username = discord.ui.TextInput(label='員工編號', placeholder='請輸入員工編號', required=True)
@@ -2852,7 +2905,7 @@ async def next_month_settings(interaction: discord.Interaction):
     )
     await interaction.response.send_message(
         embed=embed,
-        view=NextMonthReminderView(interaction.user.id),
+        view=PersistentNextMonthReminderView(),
         ephemeral=True,
     )
 
@@ -4342,6 +4395,7 @@ _auto_punch_started = False  # 確保 auto_punch_task 只啟動一次
 _commands_synced = False
 _discord_disconnected_at = None
 _health_tasks_started = False
+_persistent_views_registered = False
 SYNC_FLAG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "synced.flag")
 
 async def discord_disconnect_watchdog():
@@ -4392,11 +4446,17 @@ async def on_ready():
     global _discord_disconnected_at
     global _health_tasks_started
     global _lifecycle_startup_notice_sent
+    global _persistent_views_registered
 
     was_disconnected = _discord_disconnected_at is not None
     is_first_ready_of_this_process = not _lifecycle_startup_notice_sent
 
     _discord_disconnected_at = None
+    if not _persistent_views_registered:
+        client.add_view(PersistentNextMonthReminderView())
+        _persistent_views_registered = True
+        print("✅ 下月設定永久按鈕已註冊")
+
     # Only sync after first install or when restart_bot_resync.ps1 removes the flag.
     if not _commands_synced and not os.path.exists(SYNC_FLAG):
         try:
