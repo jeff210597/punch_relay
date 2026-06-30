@@ -960,7 +960,7 @@ def get_today_schedule(user_data):
             lines = [
                 "📴 今日為週末（六日）",
                 "自動打卡不啟動",
-                "若有值班請使用 `/值班新增` 或手動 `/打卡`"
+                "若有值班請使用 `/值班休假設定` 或手動 `/打卡`"
             ]
         return "\n".join(lines)
 
@@ -2795,7 +2795,7 @@ class BindModal(discord.ui.Modal, title='綁定打卡帳號'):
                     f"• 上班卡：07:00~07:40 隨機\n"
                     f"• 下班卡：17:05~17:40 隨機\n"
                     "• 週六日：不自動打卡\n\n"
-                    "如有值班請使用 `/值班新增` 設定\n\n"
+                    "如有值班請使用 `/值班休假設定` 設定\n\n"
                     "🔍 正在確認今日打卡狀況。\n"
                     "⚠️ 本次綁定前已過的排程不會自動補打；如需補打，會私訊請你按鈕確認。"
                 ),
@@ -2857,37 +2857,51 @@ async def next_month_settings(interaction: discord.Interaction):
     )
 
 # ── 模式切換 ──
-@tree.command(name="值班設定", description="重設指定月份值班日，例如：月份 7、日期 1 3 5")
-@app_commands.describe(月份="要設定的月份，省略則使用本月", 日期="輸入所有值班日期，例如：1 3 5 或 7/1 7/3")
-async def set_duty(interaction: discord.Interaction, 日期: str, 月份: int = None):
-    user_data = get_user_data(interaction.user.id)
-    added, removed, failed = update_date_setting(
-        user_data, "duty_days", 日期, "reset", 月份, "duty_setting"
-    )
-    save_user_data(interaction.user.id, user_data)
-    embed = build_date_setting_embed("duty", "reset", added, removed, failed)
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+SCHEDULE_KIND_CHOICES = [
+    app_commands.Choice(name="值班", value="duty"),
+    app_commands.Choice(name="休假", value="leave"),
+]
 
-@tree.command(name="值班新增", description="新增值班日，例如：月份 7、日期 6 8")
-@app_commands.describe(月份="要設定的月份，省略則使用本月", 日期="輸入值班日期，例如：6 8 或 7/6 7/8")
-async def add_duty(interaction: discord.Interaction, 日期: str, 月份: int = None):
-    user_data = get_user_data(interaction.user.id)
-    added, removed, failed = update_date_setting(
-        user_data, "duty_days", 日期, "add", 月份, "duty_setting"
-    )
-    save_user_data(interaction.user.id, user_data)
-    embed = build_date_setting_embed("duty", "add", added, removed, failed)
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+SCHEDULE_ACTION_CHOICES = [
+    app_commands.Choice(name="設定（重設整月）", value="reset"),
+    app_commands.Choice(name="新增", value="add"),
+    app_commands.Choice(name="取消", value="remove"),
+]
 
-@tree.command(name="值班取消", description="取消值班日，例如：月份 7、日期 1 8")
-@app_commands.describe(月份="要取消的月份，省略則使用本月", 日期="輸入要取消的值班日期")
-async def cancel_duty(interaction: discord.Interaction, 日期: str, 月份: int = None):
+SCHEDULE_FIELD_BY_KIND = {
+    "duty": "duty_days",
+    "leave": "leave_dates",
+}
+
+SCHEDULE_SOURCE_BY_KIND = {
+    "duty": "duty_setting",
+    "leave": "leave_setting",
+}
+
+
+@tree.command(name="值班休假設定", description="設定、新增或取消指定月份的值班/休假日期")
+@app_commands.describe(
+    類型="選擇要調整值班或休假",
+    動作="選擇設定、新增或取消",
+    月份="要調整的月份，省略則使用本月",
+    日期="輸入日期，例如：1 3 5 或 7/1 7/3",
+)
+@app_commands.choices(類型=SCHEDULE_KIND_CHOICES, 動作=SCHEDULE_ACTION_CHOICES)
+async def duty_leave_setting(
+    interaction: discord.Interaction,
+    類型: str,
+    動作: str,
+    日期: str,
+    月份: int = None,
+):
     user_data = get_user_data(interaction.user.id)
+    field = SCHEDULE_FIELD_BY_KIND[類型]
+    source = SCHEDULE_SOURCE_BY_KIND[類型]
     added, removed, failed = update_date_setting(
-        user_data, "duty_days", 日期, "remove", 月份, "duty_setting"
+        user_data, field, 日期, 動作, 月份, source
     )
     save_user_data(interaction.user.id, user_data)
-    embed = build_date_setting_embed("duty", "remove", added, removed, failed)
+    embed = build_date_setting_embed(類型, 動作, added, removed, failed)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # ── 自動打卡控制 ──
@@ -3151,40 +3165,6 @@ async def today_punch_time_removed():
 async def duty_list_placeholder(interaction: discord.Interaction):
     pass  # 已合併到值班與休假日程查詢
 
-# ── 休假功能 ──
-@tree.command(name="休假設定", description="重設指定月份休假日，例如：月份 7、日期 10 11")
-@app_commands.describe(月份="要設定的月份，省略則使用本月", 日期="輸入所有休假日期，例如：10 11 或 7/10 7/11")
-async def set_leave(interaction: discord.Interaction, 日期: str, 月份: int = None):
-    user_data = get_user_data(interaction.user.id)
-    added, removed, failed = update_date_setting(
-        user_data, "leave_dates", 日期, "reset", 月份, "leave_setting"
-    )
-    save_user_data(interaction.user.id, user_data)
-    embed = build_date_setting_embed("leave", "reset", added, removed, failed)
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-@tree.command(name="休假新增", description="新增休假日，例如：月份 7、日期 10 11")
-@app_commands.describe(月份="要設定的月份，省略則使用本月", 日期="輸入休假日期，例如：10 11 或 7/10")
-async def add_leave(interaction: discord.Interaction, 日期: str, 月份: int = None):
-    user_data = get_user_data(interaction.user.id)
-    added, removed, failed = update_date_setting(
-        user_data, "leave_dates", 日期, "add", 月份, "leave_setting"
-    )
-    save_user_data(interaction.user.id, user_data)
-    embed = build_date_setting_embed("leave", "add", added, removed, failed)
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-@tree.command(name="休假取消", description="取消休假日，例如：月份 7、日期 10 11")
-@app_commands.describe(月份="要取消的月份，省略則使用本月", 日期="輸入要取消的休假日期")
-async def cancel_leave(interaction: discord.Interaction, 日期: str, 月份: int = None):
-    user_data = get_user_data(interaction.user.id)
-    added, removed, failed = update_date_setting(
-        user_data, "leave_dates", 日期, "remove", 月份, "leave_setting"
-    )
-    save_user_data(interaction.user.id, user_data)
-    embed = build_date_setting_embed("leave", "remove", added, removed, failed)
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
 @tree.command(name="查詢值班休假日程", description="查看所有值班和休假日期")
 async def duty_leave_list(interaction: discord.Interaction):
     user_data = get_user_data(interaction.user.id)
@@ -3220,7 +3200,7 @@ async def duty_leave_list(interaction: discord.Interaction):
         description="\n\n".join(lines),
         color=0x9b59b6
     )
-    embed.set_footer(text="使用 /下月設定 可完成下月設定，或用 /值班新增、/休假新增 追加")
+    embed.set_footer(text="使用 /下月設定 可完成下月設定，或用 /值班休假設定 追加")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # ── 查詢打卡記錄 ──
@@ -3573,41 +3553,25 @@ async def admin_update_dates(interaction, target_user, raw_dates, kind, mode, mo
     embed = build_date_setting_embed(kind, mode, added, removed, failed, target_user=target_user)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@admin_group.command(name="值班設定", description="管理員重設指定使用者整月值班日")
+@admin_group.command(name="值班休假設定", description="管理員替指定使用者設定、新增或取消值班/休假日期")
 @app_commands.default_permissions(administrator=True)
-@app_commands.describe(使用者="要設定的 Discord 使用者", 月份="要設定的月份，省略則使用本月", 日期="輸入所有值班日期，例如：1 3 5 或 7/1 7/3")
-async def admin_set_duty(interaction: discord.Interaction, 使用者: discord.User, 日期: str, 月份: int = None):
-    await admin_update_dates(interaction, 使用者, 日期, "duty", "reset", 月份)
-
-@admin_group.command(name="值班新增", description="管理員新增指定使用者值班日")
-@app_commands.default_permissions(administrator=True)
-@app_commands.describe(使用者="要設定的 Discord 使用者", 月份="要設定的月份，省略則使用本月", 日期="輸入值班日期，例如：6 8 或 7/6 7/8")
-async def admin_add_duty(interaction: discord.Interaction, 使用者: discord.User, 日期: str, 月份: int = None):
-    await admin_update_dates(interaction, 使用者, 日期, "duty", "add", 月份)
-
-@admin_group.command(name="值班取消", description="管理員取消指定使用者值班日")
-@app_commands.default_permissions(administrator=True)
-@app_commands.describe(使用者="要設定的 Discord 使用者", 月份="要取消的月份，省略則使用本月", 日期="輸入要取消的值班日期")
-async def admin_cancel_duty(interaction: discord.Interaction, 使用者: discord.User, 日期: str, 月份: int = None):
-    await admin_update_dates(interaction, 使用者, 日期, "duty", "remove", 月份)
-
-@admin_group.command(name="休假設定", description="管理員重設指定使用者整月休假日")
-@app_commands.default_permissions(administrator=True)
-@app_commands.describe(使用者="要設定的 Discord 使用者", 月份="要設定的月份，省略則使用本月", 日期="輸入所有休假日期，例如：10 11 或 7/10 7/11")
-async def admin_set_leave(interaction: discord.Interaction, 使用者: discord.User, 日期: str, 月份: int = None):
-    await admin_update_dates(interaction, 使用者, 日期, "leave", "reset", 月份)
-
-@admin_group.command(name="休假新增", description="管理員新增指定使用者休假日")
-@app_commands.default_permissions(administrator=True)
-@app_commands.describe(使用者="要設定的 Discord 使用者", 月份="要設定的月份，省略則使用本月", 日期="輸入休假日期，例如：10 11 或 7/10")
-async def admin_add_leave(interaction: discord.Interaction, 使用者: discord.User, 日期: str, 月份: int = None):
-    await admin_update_dates(interaction, 使用者, 日期, "leave", "add", 月份)
-
-@admin_group.command(name="休假取消", description="管理員取消指定使用者休假日")
-@app_commands.default_permissions(administrator=True)
-@app_commands.describe(使用者="要設定的 Discord 使用者", 月份="要取消的月份，省略則使用本月", 日期="輸入要取消的休假日期")
-async def admin_cancel_leave(interaction: discord.Interaction, 使用者: discord.User, 日期: str, 月份: int = None):
-    await admin_update_dates(interaction, 使用者, 日期, "leave", "remove", 月份)
+@app_commands.describe(
+    使用者="要設定的 Discord 使用者",
+    類型="選擇要調整值班或休假",
+    動作="選擇設定、新增或取消",
+    月份="要調整的月份，省略則使用本月",
+    日期="輸入日期，例如：1 3 5 或 7/1 7/3",
+)
+@app_commands.choices(類型=SCHEDULE_KIND_CHOICES, 動作=SCHEDULE_ACTION_CHOICES)
+async def admin_duty_leave_setting(
+    interaction: discord.Interaction,
+    使用者: discord.User,
+    類型: str,
+    動作: str,
+    日期: str,
+    月份: int = None,
+):
+    await admin_update_dates(interaction, 使用者, 日期, 類型, 動作, 月份)
 
 async def send_admin_next_month_settings_panel(interaction: discord.Interaction, 使用者: discord.User, source="admin_next_month_settings"):
     if await reject_non_admin(interaction):
@@ -4098,7 +4062,7 @@ async def help_command(interaction: discord.Interaction):
                 "`/管理 綁定`、`/管理 解除綁定` — 代替指定使用者管理帳號\n"
                 "`/管理 恢復自動打卡` — 替指定使用者移除今日取消設定\n"
                 "`/管理 下月設定` — 替指定使用者設定下個月繼續自動打卡、值班與休假\n"
-                "`/管理 值班設定/新增/取消`、`/管理 休假設定/新增/取消` — 代替指定使用者調整日期"
+                "`/管理 值班休假設定` — 代替指定使用者調整值班/休假日期"
             ),
             inline=False
         )
@@ -4112,23 +4076,16 @@ async def help_command(interaction: discord.Interaction):
         inline=False
     )
     embed.add_field(
-        name="📅 值班設定",
+        name="📅 值班/休假設定",
         value=(
-            "`/值班設定 月份:7 日期:1 3 5` — **重設**指定月份值班\n"
-            "`/值班新增 月份:7 日期:6 8` — **追加**值班日，不影響同月現有設定\n"
-            "`/值班取消 月份:7 日期:1` — 取消指定月份的值班設定\n"
-            "月底前設定下個月值班日，會自動視為完成下月設定。"
-        ),
-        inline=False
-    )
-    embed.add_field(
-        name="🏖️ 休假設定",
-        value=(
-            "`/休假設定 月份:7 日期:10 11` — **重設**指定月份休假\n"
+            "`/值班休假設定 類型:值班 動作:設定 月份:7 日期:1 3 5` — **重設**指定月份值班\n"
+            "`/值班休假設定 類型:值班 動作:新增 月份:7 日期:6 8` — **追加**值班日，不影響同月現有設定\n"
+            "`/值班休假設定 類型:值班 動作:取消 月份:7 日期:1` — 取消指定月份的值班設定\n"
+            "`/值班休假設定 類型:休假 動作:設定 月份:7 日期:10 11` — **重設**指定月份休假\n"
+            "`/值班休假設定 類型:休假 動作:新增 月份:7 日期:12` — **追加**休假日，不影響同月現有設定\n"
+            "`/值班休假設定 類型:休假 動作:取消 月份:7 日期:10` — 取消指定月份的休假設定\n"
             "（若前一天是值班日，仍會打值班下班卡）\n"
-            "`/休假新增 月份:7 日期:12` — **追加**休假日，不影響同月現有設定\n"
-            "`/休假取消 月份:7 日期:10` — 取消指定月份的休假設定\n"
-            "月底前設定下個月休假日，會自動視為完成下月設定。"
+            "月底前設定下個月值班/休假日，會自動視為完成下月設定。"
         ),
         inline=False
     )
