@@ -703,62 +703,44 @@ def _t2m(t_str):
     except:
         return -1
 
-def infer_punch_times(result, is_duty_after):
-    """
-    依四線優先順序推算顯示用的上班/下班時間與來源標籤。
-    回傳 dict：
-      inferred_in      : 推算上班時間（str 或 None）
-      inferred_out     : 推算下班/值班下班時間（str 或 None）
-      in_source        : "ehr"（①）| "times"（②）| None
-      out_source       : "ehr"（①）| "times"（②）| None
-    注意：punched_today（③）由呼叫端自行處理，因為需要知道 uid/key。
+def infer_punch_times(result, is_duty_after, is_duty_today=False):
+    """Infer effective punch times from B9 index5/index6 only.
+
+    B9 index5 (`clock_in`) is the official in-card source.
+    B9 index6 (`clock_out`) is the official out-card source.
+    Raw/makeup time lists are display/debug context only and must not decide
+    in/out classification.
     """
     clock_in  = result.get("clock_in")   # e-HR index5
     clock_out = result.get("clock_out")  # e-HR index6
     clock_out_source = result.get("clock_out_source", "ehr") if clock_out else None
-    times     = result.get("times", [])  # index10 所有原始記錄（已排序）
 
-    BDRY_DUTY = 8 * 60   # 08:00
-    BDRY_OUT  = 17 * 60  # 17:00
+    duty_start_min = DUTY_OUT_START[0] * 60 + DUTY_OUT_START[1]
+    duty_end_min = DUTY_OUT_END[0] * 60 + DUTY_OUT_END[1]
 
-    # ── 上班 ──
     inferred_in = None
-    in_source   = None
-    if not is_duty_after:
-        # 值班當天或平日：取上班時間
-        if clock_in:
-            inferred_in = clock_in
-            in_source   = "ehr"
-        elif times:
-            # 取最早筆（不限時間，人資規則：最早刷卡算上班）
-            inferred_in = times[0]
-            in_source   = "times"
+    in_source = None
+    if not is_duty_after and clock_in:
+        inferred_in = clock_in
+        in_source = "ehr"
 
-    # ── 下班 / 值班下班 ──
     inferred_out = None
-    out_source   = None
+    out_source = None
     if clock_out:
-        inferred_out = clock_out
-        out_source   = clock_out_source
-    elif times:
+        out_min = _t2m(clock_out)
         if is_duty_after:
-            # 值班隔天：取 ≥08:00 的最晚筆，< 08:00 的忽略
-            candidates = [t for t in times if _t2m(t) >= BDRY_DUTY]
-            if candidates:
-                inferred_out = candidates[-1]
-                out_source   = "times"
-        else:
-            # 平日：取 ≥17:00 的最晚筆
-            candidates = [t for t in times if _t2m(t) >= BDRY_OUT]
-            if candidates:
-                inferred_out = candidates[-1]
-                out_source   = "times"
+            if duty_start_min <= out_min <= duty_end_min:
+                inferred_out = clock_out
+                out_source = clock_out_source
+        elif not is_duty_today:
+            inferred_out = clock_out
+            out_source = clock_out_source
 
     return {
-        "inferred_in":  inferred_in,
+        "inferred_in": inferred_in,
         "inferred_out": inferred_out,
-        "in_source":    in_source,
-        "out_source":   out_source,
+        "in_source": in_source,
+        "out_source": out_source,
     }
 
 def fmt_source(source, is_in=True):
@@ -1670,11 +1652,11 @@ async def auto_punch_task(client):
                     def do_check(ep=empid_c, pw=password_c):
                         return _query_today_from_monthly_b9(ep, pw)
                     result_c = await asyncio.get_event_loop().run_in_executor(None, do_check)
-                    inferred_c = infer_punch_times(result_c, False) if result_c.get("success") else {"inferred_out": None, "out_source": None}
+                    inferred_c = infer_punch_times(result_c, False, False) if result_c.get("success") else {"inferred_out": None, "out_source": None}
                     eff_out_c = inferred_c["inferred_out"]
                     out_src_c = inferred_c["out_source"]
 
-                    # ① e-HR index6 有值，或 ② times 推算有結果 → 不通知
+                    # B9 index6 有值才視為已記錄下班；raw/makeup times 不作為上下班判斷。
                     if eff_out_c:
                         pass
                     else:
@@ -1732,10 +1714,10 @@ async def auto_punch_task(client):
                     def do_check2(ep=empid_c2, pw=password_c2):
                         return _query_today_from_monthly_b9(ep, pw)
                     result_c2 = await asyncio.get_event_loop().run_in_executor(None, do_check2)
-                    inferred_c2 = infer_punch_times(result_c2, True) if result_c2.get("success") else {"inferred_out": None, "out_source": None}
+                    inferred_c2 = infer_punch_times(result_c2, True, False) if result_c2.get("success") else {"inferred_out": None, "out_source": None}
                     eff_out_c2 = inferred_c2["inferred_out"]
 
-                    # ① index6 有值，或 ② times ≥08:00 推算有結果 → 不通知
+                    # B9 index6 有值且落在值班下班範圍才視為已記錄；raw/makeup times 不作為上下班判斷。
                     if eff_out_c2:
                         pass
                     else:
@@ -2683,7 +2665,7 @@ async def new_user_punch_assessment(discord_user, uid_str, empid, password, user
             return _query_today_from_monthly_b9(ep, pw)
 
         result = await asyncio.get_event_loop().run_in_executor(None, do_assess)
-        inferred = infer_punch_times(result, is_duty_after) if result.get("success") else {
+        inferred = infer_punch_times(result, is_duty_after, is_duty_today) if result.get("success") else {
             "inferred_in": None, "inferred_out": None, "in_source": None, "out_source": None
         }
         eff_in  = inferred["inferred_in"]
@@ -2698,7 +2680,7 @@ async def new_user_punch_assessment(discord_user, uid_str, empid, password, user
                 # 08:00 前，等排程自動打
                 pass
             else:
-                # 08:00 後，查 index6/times ≥08:00
+                # 08:00 後，只查 B9 index6 是否有值班下班紀錄。
                 if eff_out:
                     pass  # 有記錄，不處理
                 else:
@@ -3048,9 +3030,9 @@ async def today_status(interaction: discord.Interaction):
 
     result = await loop.run_in_executor(None, do_status_query)
 
-    # ── 四線優先順序推算 ──
+    # ── 依 B9 index5/index6 推算 ──
     is_duty_after = is_duty_day(user_data, yesterday)
-    inferred = infer_punch_times(result, is_duty_after) if result.get("success") else {
+    inferred = infer_punch_times(result, is_duty_after, is_duty_day(user_data, today)) if result.get("success") else {
         "inferred_in": None, "inferred_out": None, "in_source": None, "out_source": None
     }
     eff_in      = inferred["inferred_in"]
@@ -3076,7 +3058,12 @@ async def today_status(interaction: discord.Interaction):
 
     # 今天是哪種模式
     if is_duty_after:
-        lines.append("🌙 今日為值班隔天")
+        if is_leave_day(user_data, today):
+            lines.append("🏖️ 今日為休假（值班隔天）")
+        elif is_weekend(today):
+            lines.append("📴 今日為週末（值班隔天）")
+        else:
+            lines.append("🌅 今日為值班隔天")
     elif is_weekend(today) and is_duty_day(user_data, today):
         lines.append("🌙 今日為週末值班日")
     elif is_duty_day(user_data, today):
@@ -3179,6 +3166,15 @@ async def today_status(interaction: discord.Interaction):
             match_lines.append(f"🤖 值班下班：Bot {t} 刷卡，但 e-HR 尚未記錄")
         else:
             match_lines.append("🤖 值班下班：⚠️ e-HR 尚未記錄到刷卡")
+    elif is_duty_day(user_data, today):
+        if eff_in:
+            ml = _match_line("上班卡", scheduled_in, eff_in, in_source)
+            if ml:
+                match_lines.append(ml)
+        elif punched_in_t is not None:
+            t = punched_in_t if punched_in_t else scheduled_in
+            match_lines.append(f"🤖 上班卡：Bot {t} 刷卡，但 e-HR 尚未記錄")
+        match_lines.append("🤖 值班下班：明天才比對")
     else:
         if eff_in:
             ml = _match_line("上班卡", scheduled_in, eff_in, in_source)
@@ -3325,8 +3321,8 @@ async def query_punch_record(interaction: discord.Interaction, 員工編號: str
         has_data = result.get("success") and (result.get("times") or result.get("clock_in") or result.get("clock_out"))
 
         if has_data:
-            # ── 四線推算 ──
-            inferred = infer_punch_times(result, is_duty_after)
+            # ── 依 B9 index5/index6 推算 ──
+            inferred = infer_punch_times(result, is_duty_after, is_duty_day(user_data_for_schedule, today))
             eff_in     = inferred["inferred_in"]
             eff_out    = inferred["inferred_out"]
             in_source  = inferred["in_source"]
@@ -3743,7 +3739,7 @@ async def admin_query(interaction: discord.Interaction):
         scheduled_out = scheduled(uid, "out")
         scheduled_duty = scheduled(uid, "dutyout")
         ehr_result = ehr_results.get(uid, {"success": False, "message": "查詢失敗"})
-        inferred = infer_punch_times(ehr_result, is_duty_after) if ehr_result.get("success") else {
+        inferred = infer_punch_times(ehr_result, is_duty_after, is_duty_today) if ehr_result.get("success") else {
             "inferred_in": None, "inferred_out": None, "in_source": None, "out_source": None
         }
         actual_in = inferred.get("inferred_in")
@@ -3925,7 +3921,7 @@ async def admin_verify_today(interaction: discord.Interaction):
 
         detail_lines = [f"👤 <@{uid}>　員工編號：{empid}", f"　今日模式：{mode}"]
         if result.get("success"):
-            inferred = infer_punch_times(result, is_duty_after)
+            inferred = infer_punch_times(result, is_duty_after, is_duty_today)
             actual_in = inferred.get("inferred_in")
             actual_out = inferred.get("inferred_out")
             raw_values = result.get("raw_times", [])
@@ -4164,7 +4160,7 @@ async def help_command(interaction: discord.Interaction):
             "　週末非值班：不提醒\n\n"
             "**③ 下班比對**\n"
             "　平日 18:00 / 值班隔天 09:00：查詢 e-HR 記錄\n"
-            "　e-HR 有記錄（index6 或 times）→ 不通知（打卡成功）\n"
+            "　e-HR 有記錄（B9 index6）→ 不通知（打卡成功）\n"
             "　e-HR 無記錄但 Bot 已打卡 → 通知「e-HR 尚未記錄」+ 補打按鈕\n"
             "　完全無記錄 → 通知「未偵測到打卡」+ 補打按鈕\n\n"
             "**④ 月底摘要**（每月最後一天 19:00）\n"

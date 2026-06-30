@@ -47,6 +47,8 @@ powershell -ExecutionPolicy Bypass -File .\restart_bot_resync.ps1 -NoPause
 - If one B9 path changes, inspect all render and comparison paths that consume `clock_in`, `clock_out`, `clock_out_source`, `raw_times`, or `makeup_times`.
 - B9 row fields are interpreted as `date`, `shift`, `in`, `out`, `abnormal`, `leave_text`, `raw_times`, and `makeup_times`.
 - Preserve `shift` and `abnormal`; do not parse only the visible in/out time cells.
+- Use B9 index5 (`clock_in`) as the official in-card source and B9 index6 (`clock_out`) as the official out-card source.
+- Do not infer in/out cards from the ordinal position of `raw_times` or `makeup_times`; those lists are display/debug context only.
 - Parse B9 time cells by extracting the first four-digit time.
 - A value like `0805(next-day marker)` means `08:05` with an `out_next_day=True` marker. Do not discard it because the cell has extra text.
 - For a duty day, a valid duty-out source can be either:
@@ -71,6 +73,7 @@ powershell -ExecutionPolicy Bypass -File .\restart_bot_resync.ps1 -NoPause
 Use small synthetic B9 HTML fixtures when changing B9 logic:
 
 - Supervisor-uploaded duty: duty day row has `in=0708`, `out=0805(next-day marker)`, next day has no out. Expected: next-day query returns `clock_out=08:05`, `clock_out_source=ehr_next_day`, and the monthly summary counts the duty day as normal.
+- Duty day double morning punch: duty day row has `in=0713`, `out=0726`, and raw times include both values. Expected: `0713` is the in-card, no same-day out-card is compared, and `0726` is not treated as a normal out-card.
 - Duty not uploaded yet: duty day row has `in=0708`, next day row has `out=0805`. Expected: summary credits `08:05` back to the duty day when local `duty_days` marks the previous date as duty.
 - Non-work accidental punch: a local leave day or weekend non-duty day has a punch such as `1932`. Expected: summary ignores it for normal, abnormal, and missing counts.
 - Missing expected work: a normal workday, duty day, or duty-after requirement lacks the required card. Expected: summary counts it as abnormal or missing.
