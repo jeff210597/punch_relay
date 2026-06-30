@@ -11,6 +11,7 @@ punched_today.json
 schedule_today.json
 admin_alerts_today.json
 monthly_binding_admin_summary.json
+monthly_summary_sent.json
 bot_runtime_state.json
 bot_runtime_state.json.tmp
 synced.flag

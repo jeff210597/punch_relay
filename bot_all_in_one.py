@@ -715,6 +715,7 @@ def infer_punch_times(result, is_duty_after):
     """
     clock_in  = result.get("clock_in")   # e-HR index5
     clock_out = result.get("clock_out")  # e-HR index6
+    clock_out_source = result.get("clock_out_source", "ehr") if clock_out else None
     times     = result.get("times", [])  # index10 所有原始記錄（已排序）
 
     BDRY_DUTY = 8 * 60   # 08:00
@@ -738,7 +739,7 @@ def infer_punch_times(result, is_duty_after):
     out_source   = None
     if clock_out:
         inferred_out = clock_out
-        out_source   = "ehr"
+        out_source   = clock_out_source
     elif times:
         if is_duty_after:
             # 值班隔天：取 ≥08:00 的最晚筆，< 08:00 的忽略
@@ -765,6 +766,8 @@ def fmt_source(source, is_in=True):
     kind = "刷卡" if is_in else "刷退"
     if source == "ehr":
         return f"e-HR {kind}時間"
+    elif source == "ehr_next_day":
+        return f"e-HR {kind}時間（隔天）"
     elif source == "times":
         return "e-HR 有記錄但刷卡/出卡時間待定"
     return ""
@@ -980,6 +983,7 @@ PUNCHED_FILE = "punched_today.json"
 SCHEDULE_FILE = "schedule_today.json"
 ADMIN_ALERTS_FILE = "admin_alerts_today.json"
 MONTHLY_BINDING_ADMIN_SUMMARY_FILE = "monthly_binding_admin_summary.json"
+MONTHLY_SUMMARY_SENT_FILE = "monthly_summary_sent.json"
 RETRY_DELAY_MINUTES = 2
 MAX_RETRY_ATTEMPTS = 3
 PUNCH_IN_CUTOFF_MIN = 8 * 60
@@ -1051,6 +1055,23 @@ def save_admin_alerts_today(alerts, today_str):
             json.dump({"date": today_str, "alerts": sorted(alerts)}, f, ensure_ascii=False, indent=2)
     except:
         pass
+
+def load_monthly_summary_sent_state():
+    try:
+        if os.path.exists(MONTHLY_SUMMARY_SENT_FILE):
+            with open(MONTHLY_SUMMARY_SENT_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        pass
+    return {}
+
+def save_monthly_summary_sent_state(state):
+    try:
+        with open(MONTHLY_SUMMARY_SENT_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"月底摘要狀態儲存失敗：{e}")
 
 def _admin_alert_key(uid, label, today_str, alert_type):
     safe_label = (label or "unknown").replace(" ", "_")
@@ -1771,31 +1792,42 @@ async def auto_punch_task(client):
             except Exception as e:
                 print(f"bot.log 清理失敗：{e}")
 
-        # ── 每月最後一天 22:00 發送本月打卡摘要 ──
-        if current_time == "22:00":
-            next_day = today + timedelta(days=1)
-            if next_day.month != today.month:  # 今天是本月最後一天
-                data_summary = load_data()
-                for uid_s, ud_s in data_summary.items():
-                    if not ud_s.get("empid"):
-                        continue
-                    empid_s = ud_s.get("empid")
-                    password_s = ud_s.get("password")
-                    if not empid_s or not password_s:
-                        continue
+        # ── 每月最後一天 19:00 後發送本月打卡摘要；錯過整點會補發，成功者不重複 ──
+        next_day = today + timedelta(days=1)
+        if next_day.month != today.month and current_time >= "19:00":
+            target_month_key = month_key(today)
+            summary_state = load_monthly_summary_sent_state()
+            sent_by_month = summary_state.setdefault("sent", {})
+            sent_users = set(sent_by_month.get(target_month_key, []))
+            data_summary = load_data()
+            changed_summary_state = False
+            for uid_s, ud_s in data_summary.items():
+                if uid_s in sent_users:
+                    continue
+                if not ud_s.get("notify", {}).get("monthly", True):
+                    continue
+                empid_s = ud_s.get("empid")
+                password_s = ud_s.get("password")
+                if not empid_s or not password_s:
+                    continue
+                try:
+                    summary_result = await asyncio.get_event_loop().run_in_executor(
+                        None, lambda ep=empid_s, pw=password_s, ud=ud_s: _query_monthly_summary(ep, pw, ud)
+                    )
                     try:
-                        if not ud_s.get("notify", {}).get("monthly", True):
-                            continue
-                        summary_result = await asyncio.get_event_loop().run_in_executor(
-                            None, lambda ep=empid_s, pw=password_s: _query_monthly_summary(ep, pw)
-                        )
-                        try:
-                            summary_user = client.get_user(int(uid_s)) or await client.fetch_user(int(uid_s))
-                            await summary_user.send(summary_result)
-                        except Exception as e:
-                            print(f"月底摘要私訊失敗 {uid_s}：{e}")
+                        summary_user = client.get_user(int(uid_s)) or await client.fetch_user(int(uid_s))
+                        await summary_user.send(summary_result)
+                        sent_users.add(uid_s)
+                        sent_by_month[target_month_key] = sorted(sent_users)
+                        changed_summary_state = True
+                        save_monthly_summary_sent_state(summary_state)
+                        print(f"月底摘要已發送 {uid_s}：{target_month_key}")
                     except Exception as e:
-                        print(f"月底摘要查詢失敗 {uid_s}：{e}")
+                        print(f"月底摘要私訊失敗 {uid_s}：{e}")
+                except Exception as e:
+                    print(f"月底摘要查詢失敗 {uid_s}：{e}")
+            if changed_summary_state:
+                save_monthly_summary_sent_state(summary_state)
 
         await asyncio.sleep(60)
 
@@ -1875,6 +1907,63 @@ def _query_monthly_b9(empid, password):
     except Exception:
         return ""
 
+def _date_to_roc(check_date):
+    return f"{check_date.year - 1911:03d}/{check_date.month:02d}/{check_date.day:02d}"
+
+def _roc_to_date(roc_date):
+    y, m, d = [int(part) for part in roc_date.split("/")]
+    return date(y + 1911, m, d)
+
+def _parse_b9_time_cell(value):
+    value = (value or "").strip()
+    match = re.search(r'(\d{4})', value)
+    if not match:
+        return None, False
+    raw = match.group(1)
+    return f"{raw[:2]}:{raw[2:]}", "隔天" in value
+
+def _parse_b9_time_list(value):
+    parsed = []
+    if not value:
+        return parsed
+    for item in re.split(r'[,，]', value):
+        t, _is_next_day = _parse_b9_time_cell(item)
+        if t:
+            parsed.append(t)
+    return parsed
+
+def _records_by_roc_date(records):
+    return {item.get("date"): item for item in records if item.get("date")}
+
+def _record_all_times(record):
+    if not record:
+        return []
+    times = set(record.get("raw_times") or [])
+    times.update(record.get("makeup_times") or [])
+    if record.get("in"):
+        times.add(record["in"])
+    if record.get("out"):
+        times.add(record["out"])
+    return sorted(times)
+
+def _next_day_out_from_previous_record(records_by_date, target_date):
+    prev_record = records_by_date.get(_date_to_roc(target_date - timedelta(days=1)))
+    if prev_record and prev_record.get("out_next_day") and prev_record.get("out"):
+        return prev_record.get("out")
+    return None
+
+def _duty_out_for_work_date(records_by_date, work_date):
+    record = records_by_date.get(_date_to_roc(work_date))
+    if record and record.get("out_next_day") and record.get("out"):
+        return record.get("out"), "ehr_next_day"
+    next_record = records_by_date.get(_date_to_roc(work_date + timedelta(days=1)))
+    next_out = next_record.get("out") if next_record else None
+    duty_start_min = DUTY_OUT_START[0] * 60 + DUTY_OUT_START[1]
+    duty_end_min = DUTY_OUT_END[0] * 60 + DUTY_OUT_END[1]
+    if next_out and duty_start_min <= _t2m(next_out) <= duty_end_min:
+        return next_out, "ehr"
+    return None, None
+
 def _parse_monthly_records(html):
     """從 B9 HTML 解析本月每天打卡記錄
     先定位到 TBODY，再逐行解析資料 TR
@@ -1909,37 +1998,28 @@ def _parse_monthly_records(html):
         if len(td_texts) < 7:
             continue
 
-        def clean_time(s):
-            s = s.strip()
-            return s if re.fullmatch(r'\d{4}', s) else None
-
+        shift = td_texts[4].strip() if len(td_texts) > 4 else ""
         raw_in  = td_texts[5] if len(td_texts) > 5 else ""
         raw_out = td_texts[6] if len(td_texts) > 6 else ""
         abnormal = td_texts[7].strip() if len(td_texts) > 7 else ""
+        leave_text = td_texts[8].strip() if len(td_texts) > 8 else ""
         raw_times_str = td_texts[10].strip() if len(td_texts) > 10 else ""
         makeup_times_str = td_texts[11].strip() if len(td_texts) > 11 else ""
 
-        clock_in  = f"{raw_in[:2]}:{raw_in[2:]}"   if clean_time(raw_in)  else None
-        clock_out = f"{raw_out[:2]}:{raw_out[2:]}"  if clean_time(raw_out) else None
-
-        def parse_time_list(value):
-            parsed = []
-            if not value:
-                return parsed
-            for t in value.split(','):
-                t = t.strip()
-                if re.fullmatch(r'\d{4}', t):
-                    parsed.append(f"{t[:2]}:{t[2:]}")
-            return parsed
-
-        raw_times = parse_time_list(raw_times_str)
-        makeup_times = parse_time_list(makeup_times_str)
+        clock_in, _in_next_day = _parse_b9_time_cell(raw_in)
+        clock_out, out_next_day = _parse_b9_time_cell(raw_out)
+        raw_times = _parse_b9_time_list(raw_times_str)
+        makeup_times = _parse_b9_time_list(makeup_times_str)
 
         records.append({
             "date": roc_date,
+            "gregorian_date": _roc_to_date(roc_date),
+            "shift": shift,
             "in": clock_in,
             "out": clock_out,
+            "out_next_day": out_next_day,
             "abnormal": abnormal,
+            "leave_text": leave_text,
             "raw_times": raw_times,
             "makeup_times": makeup_times,
         })
@@ -1952,19 +2032,20 @@ def _query_today_from_monthly_b9(empid, password, target_date=None):
     if not html:
         return {"success": False, "message": "B9 考勤彙總表查詢失敗"}
 
-    roc_date = f"{target_date.year - 1911:03d}/{target_date.month:02d}/{target_date.day:02d}"
-    record = next((item for item in _parse_monthly_records(html) if item.get("date") == roc_date), None)
-    if not record:
+    records = _parse_monthly_records(html)
+    records_by_date = _records_by_roc_date(records)
+    roc_date = _date_to_roc(target_date)
+    record = records_by_date.get(roc_date)
+    next_day_out = _next_day_out_from_previous_record(records_by_date, target_date)
+    if not record and not next_day_out:
         return {"success": False, "message": "今日尚無刷卡記錄"}
 
-    clock_in = record.get("in")
-    clock_out = record.get("out")
-    times = set(record.get("raw_times") or [])
-    times.update(record.get("makeup_times") or [])
-    if clock_in:
-        times.add(clock_in)
-    if clock_out:
-        times.add(clock_out)
+    clock_in = record.get("in") if record else None
+    clock_out = next_day_out or (record.get("out") if record else None)
+    clock_out_source = "ehr_next_day" if next_day_out else ("ehr" if clock_out else None)
+    times = set(_record_all_times(record))
+    if next_day_out:
+        times.add(next_day_out)
     if not times:
         return {"success": False, "message": "今日尚無刷卡記錄"}
 
@@ -1975,7 +2056,11 @@ def _query_today_from_monthly_b9(empid, password, target_date=None):
         "makeup_times": sorted(set(record.get("makeup_times") or [])),
         "clock_in": clock_in,
         "clock_out": clock_out,
-        "abnormal": record.get("abnormal", ""),
+        "clock_out_source": clock_out_source,
+        "next_day_out": next_day_out,
+        "abnormal": record.get("abnormal", "") if record else "",
+        "shift": record.get("shift", "") if record else "",
+        "leave_text": record.get("leave_text", "") if record else "",
         "source": "b9",
     }
 
@@ -1988,6 +2073,7 @@ def _query_monthly_summary(empid, password, user_data=None):
     records = _parse_monthly_records(html)
     if not records:
         return f"🤖 **{today.month}月打卡摘要**\n\n查無本月打卡記錄"
+    records_by_date = _records_by_roc_date(records)
 
     # 取得 Discord 設定的打卡時間範圍（用於比對）
     in_start = f"{PUNCH_IN_START[0]:02d}:{PUNCH_IN_START[1]:02d}"
@@ -2013,19 +2099,63 @@ def _query_monthly_summary(empid, password, user_data=None):
     lines.append(f"📌 Bot 設定範圍　上班 {in_start}~{in_end}　下班 {out_start}~{out_end}\n")
     ok_count = 0
     miss_count = 0
+    ignored_count = 0
+
+    def local_duty(check_date):
+        return bool(user_data) and is_duty_day(user_data, check_date)
+
+    def local_leave(check_date):
+        return bool(user_data) and is_leave_day(user_data, check_date)
+
+    def b9_duty(record):
+        return bool(record and (record.get("out_next_day") or "W7" in record.get("shift", "")))
+
+    def is_expected_nonwork(check_date):
+        return local_leave(check_date) or (is_weekend(check_date) and not local_duty(check_date))
 
     for r in records:
         d = r["date"]
+        check_date = r.get("gregorian_date") or _roc_to_date(d)
         ci = r["in"]
         co = r["out"]
         abnormal = r.get("abnormal", "")
+        all_times = _record_all_times(r)
+        duty_today = local_duty(check_date) or b9_duty(r)
+        duty_after_today = (
+            (bool(user_data) and is_duty_day(user_data, check_date - timedelta(days=1)))
+            or b9_duty(records_by_date.get(_date_to_roc(check_date - timedelta(days=1))))
+        )
+
+        # 休假或週末非值班屬於不用上班；即使誤刷卡/刷退也不列異常。
+        if is_expected_nonwork(check_date) and not duty_today and not duty_after_today:
+            ignored_count += 1
+            if all_times:
+                lines.append(f"ℹ️ {d}　休假/週末非值班，有刷卡紀錄但不列異常")
+            else:
+                lines.append(f"ℹ️ {d}　休假/週末非值班，無需打卡")
+            continue
+
+        # 值班隔天的值班下班已歸到前一天值班日，不重複計為當天缺卡。
+        if duty_after_today and not duty_today:
+            ignored_count += 1
+            if all_times:
+                lines.append(f"ℹ️ {d}　值班隔天紀錄已併入前一日值班下班")
+            else:
+                lines.append(f"ℹ️ {d}　值班隔天，無一般上下班卡")
+            continue
 
         ci_str = ci or "—"
-        co_str = co or "—"
+        if duty_today:
+            duty_out, duty_out_source = _duty_out_for_work_date(records_by_date, check_date)
+            co = duty_out
+            co_suffix = "（隔天）" if duty_out_source == "ehr_next_day" else ""
+        else:
+            co_suffix = ""
+        co_str = (co + co_suffix) if co else "—"
 
         # 判斷是否在範圍內
         ci_ok = in_range(ci, in_start, in_end)
-        co_ok = in_range(co, out_start, out_end)
+        co_ok = in_range(co, duty_start, duty_end) if duty_today else in_range(co, out_start, out_end)
 
         # 上班時間標記
         if ci and ci_ok is True:
@@ -2035,17 +2165,22 @@ def _query_monthly_summary(empid, password, user_data=None):
         else:
             ci_label = ci_str
 
-        # 下班時間標記（也檢查值班下班範圍）
-        co_ok2 = in_range(co, duty_start, duty_end)
-        if co and (co_ok is True or co_ok2 is True):
+        # 下班時間標記
+        if co and co_ok is True:
             co_label = f"{co_str}✅"
-        elif co and co_ok is False and co_ok2 is False:
+        elif co and co_ok is False:
             co_label = f"{co_str}⚠️"
         else:
             co_label = co_str
 
         if abnormal:
             lines.append(f"⚠️ {d}　上班 {ci_label}　下班 {co_label}　{abnormal}")
+            miss_count += 1
+        elif duty_today and ci and co:
+            lines.append(f"✅ {d}　值班　上班 {ci_label}　值班下班 {co_label}")
+            ok_count += 1
+        elif duty_today:
+            lines.append(f"⚠️ {d}　值班　上班 {ci_label}　值班下班 {co_label}（缺卡）")
             miss_count += 1
         elif ci and co:
             lines.append(f"✅ {d}　上班 {ci_label}　下班 {co_label}")
@@ -2057,8 +2192,8 @@ def _query_monthly_summary(empid, password, user_data=None):
             lines.append(f"❌ {d}　無刷卡記錄")
             miss_count += 1
 
-    lines.append(f"\n📊 共 {ok_count} 天正常，{miss_count} 天異常/缺卡")
-    lines.append(f"✅=在Bot範圍內　⚠️=超出範圍或異常")
+    lines.append(f"\n📊 共 {ok_count} 天正常，{miss_count} 天異常/缺卡，{ignored_count} 天休假/週末/值班隔天略過")
+    lines.append(f"✅=在Bot範圍內　⚠️=超出範圍或異常　ℹ️=無需一般打卡")
     return "\n".join(lines)
 
 # =====================
@@ -2068,11 +2203,12 @@ intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
-def is_admin_user(user_id):
-    return user_id in globals().get("ADMIN_IDS", set())
+def is_admin_interaction(interaction):
+    permissions = getattr(getattr(interaction, "user", None), "guild_permissions", None)
+    return bool(permissions and permissions.administrator)
 
 async def reject_non_admin(interaction):
-    if is_admin_user(interaction.user.id):
+    if is_admin_interaction(interaction):
         return False
     embed = discord.Embed(title="❌ 權限不足", description="此指令僅限管理員使用", color=0xff0000)
     if interaction.response.is_done():
@@ -2164,8 +2300,12 @@ def build_date_setting_embed(kind, mode, added, removed, failed, target_user=Non
         desc = target_prefix + "沒有變更任何設定"
     return discord.Embed(title=title_map[(kind, mode)], description=desc, color=color)
 
-admin_group = app_commands.Group(name="管理", description="管理員專用指令")
-admin_group.default_permissions = discord.Permissions(administrator=True)
+admin_group = app_commands.Group(
+    name="管理",
+    description="管理員專用指令",
+    default_permissions=discord.Permissions(administrator=True),
+    guild_only=True,
+)
 tree.add_command(admin_group)
 
 # ── 補打卡確認 View（需使用者按鈕確認才打卡）──
@@ -2904,8 +3044,8 @@ async def today_status(interaction: discord.Interaction):
         lines.append("⏳ 今天不打下班卡")
         lines.append(f"　↳ 明天 **{scheduled_duty or '08:05~08:40'}** 自動打值班下班卡")
     elif is_duty_after:
-        if eff_out and out_source == "ehr":
-            lines.append(f"✅ 已在 **{eff_out}** 打卡值班下班")
+        if eff_out and out_source in ("ehr", "ehr_next_day"):
+            lines.append(f"✅ 已在 **{eff_out}** 打卡值班下班\n　（{fmt_source(out_source, is_in=False)}）")
         elif eff_out and out_source == "times":
             lines.append(f"✅ 已在 **{eff_out}** 打卡值班下班\n　（e-HR 有記錄但刷卡/出卡時間待定）")
         elif punched_duty_t is not None:
@@ -2918,8 +3058,8 @@ async def today_status(interaction: discord.Interaction):
     elif is_weekend(today):
         lines.append("📴 週末不打下班卡")
     else:
-        if eff_out and out_source == "ehr":
-            lines.append(f"✅ 已在 **{eff_out}** 打卡下班")
+        if eff_out and out_source in ("ehr", "ehr_next_day"):
+            lines.append(f"✅ 已在 **{eff_out}** 打卡下班\n　（{fmt_source(out_source, is_in=False)}）")
         elif eff_out and out_source == "times":
             lines.append(f"✅ 已在 **{eff_out}** 打卡下班\n　（e-HR 有記錄但刷卡/出卡時間待定）")
         elif punched_out_t is not None:
@@ -2953,7 +3093,7 @@ async def today_status(interaction: discord.Interaction):
             return f"🤖 {label}：Bot {bot_t} ＝ e-HR 紀錄 {actual_t} {match_str}{suffix}"
         else:
             # 不符：中間用不等號，並依來源加備註
-            if source == "ehr":
+            if source in ("ehr", "ehr_next_day"):
                 note = "（e-HR 已記錄，不用擔心）"
             elif source == "times":
                 note = "（e-HR 有記錄但刷卡/出卡時間待定）"
@@ -3158,7 +3298,10 @@ async def query_punch_record(interaction: discord.Interaction, 員工編號: str
             eff_out    = inferred["inferred_out"]
             in_source  = inferred["in_source"]
             out_source = inferred["out_source"]
-            times_list = sorted(set(result.get("raw_times", [])) | set(result.get("makeup_times", []))) or result.get("times", [])
+            times_set = set(result.get("raw_times", [])) | set(result.get("makeup_times", []))
+            if result.get("next_day_out"):
+                times_set.add(result["next_day_out"])
+            times_list = sorted(times_set) or result.get("times", [])
 
             # ── 刷卡列表 ──
             desc_lines = [f"**{date_label} 刷卡記錄**", ""]
@@ -3180,13 +3323,13 @@ async def query_punch_record(interaction: discord.Interaction, 員工編號: str
             elif is_duty_day(user_data_for_schedule, today):
                 # 值班當天：顯示上班時間
                 if eff_in and in_source == "ehr":
-                    desc_lines.append(f"**上班：** {eff_in}（e-HR 刷卡時間）")
+                    desc_lines.append(f"**上班：** {eff_in}（{fmt_source(in_source, is_in=True)}）")
                 elif eff_in and in_source == "times":
                     desc_lines.append(f"**上班：** {eff_in}（e-HR 有記錄但刷卡/出卡時間待定）")
             else:
                 # 平日
                 if eff_in and in_source == "ehr":
-                    desc_lines.append(f"**上班：** {eff_in}（e-HR 刷卡時間）")
+                    desc_lines.append(f"**上班：** {eff_in}（{fmt_source(in_source, is_in=True)}）")
                 elif eff_in and in_source == "times":
                     desc_lines.append(f"**上班：** {eff_in}（e-HR 有記錄但刷卡/出卡時間待定）")
 
@@ -3195,8 +3338,8 @@ async def query_punch_record(interaction: discord.Interaction, 員工編號: str
                 desc_lines.append("**下班：** 值班日，不打下班卡")
                 desc_lines.append(f"　↳ 明天 **{user_schedule.get('dutyout', '08:05~08:40')}** 自動打值班下班卡")
             elif is_duty_after:
-                if eff_out and out_source == "ehr":
-                    desc_lines.append(f"**值班下班：** {eff_out}（e-HR 刷退時間）")
+                if eff_out and out_source in ("ehr", "ehr_next_day"):
+                    desc_lines.append(f"**值班下班：** {eff_out}（{fmt_source(out_source, is_in=False)}）")
                 elif eff_out and out_source == "times":
                     desc_lines.append(f"**值班下班：** {eff_out}（e-HR 有記錄但刷卡/出卡時間待定）")
                 elif punched_duty_t is not None:
@@ -3208,8 +3351,8 @@ async def query_punch_record(interaction: discord.Interaction, 員工編號: str
                     if dutyout_time:
                         desc_lines.append(f"　↳ 預計 {dutyout_time} 自動打值班下班卡")
             else:
-                if eff_out and out_source == "ehr":
-                    desc_lines.append(f"**下班：** {eff_out}（e-HR 刷退時間）")
+                if eff_out and out_source in ("ehr", "ehr_next_day"):
+                    desc_lines.append(f"**下班：** {eff_out}（{fmt_source(out_source, is_in=False)}）")
                 elif eff_out and out_source == "times":
                     desc_lines.append(f"**下班：** {eff_out}（e-HR 有記錄但刷卡/出卡時間待定）")
                 elif punched_out_t is not None:
@@ -3293,7 +3436,8 @@ async def monthly_summary_command(interaction: discord.Interaction, 員工編號
         await interaction.followup.send(embed=embed, ephemeral=True)
         return
     loop = asyncio.get_event_loop()
-    summary_text = await loop.run_in_executor(None, lambda: _query_monthly_summary(empid, password))
+    summary_user_data = user_data if not 員工編號 and not 密碼 else None
+    summary_text = await loop.run_in_executor(None, lambda: _query_monthly_summary(empid, password, summary_user_data))
     # 分頁處理（超過 3800 字元時分割）
     if len(summary_text) > 3800:
         half = len(summary_text) // 2
@@ -3367,7 +3511,7 @@ class AdminBindModal(discord.ui.Modal, title='管理員代綁定帳號'):
             embed = discord.Embed(title="❌ 錯誤", description=str(e), color=0xff0000)
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-@admin_group.command(name="綁定", description="管理員代替使用者綁定 e-HR 帳號")
+@admin_group.command(name="綁定", description="管理員代替使用者綁定 e-HR 帳號（需帳密）")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(使用者="要代為綁定的 Discord 使用者")
 async def admin_bind_user(interaction: discord.Interaction, 使用者: discord.User):
@@ -3465,10 +3609,7 @@ async def admin_add_leave(interaction: discord.Interaction, 使用者: discord.U
 async def admin_cancel_leave(interaction: discord.Interaction, 使用者: discord.User, 日期: str, 月份: int = None):
     await admin_update_dates(interaction, 使用者, 日期, "leave", "remove", 月份)
 
-@admin_group.command(name="下月設定", description="管理員替指定使用者設定下個月自動打卡與休假值班日")
-@app_commands.default_permissions(administrator=True)
-@app_commands.describe(使用者="要設定的 Discord 使用者")
-async def admin_next_month_settings(interaction: discord.Interaction, 使用者: discord.User):
+async def send_admin_next_month_settings_panel(interaction: discord.Interaction, 使用者: discord.User, source="admin_next_month_settings"):
     if await reject_non_admin(interaction):
         return
     user_data = get_user_data(使用者.id)
@@ -3490,18 +3631,22 @@ async def admin_next_month_settings(interaction: discord.Interaction, 使用者:
             target_uid=使用者.id,
             actor_uid=interaction.user.id,
             target_label=使用者.mention,
-            source="admin_next_month_settings",
+            source=source,
             require_binding=False,
         ),
         ephemeral=True,
     )
 
+@admin_group.command(name="下月設定", description="管理員替指定使用者設定下個月自動打卡與休假值班日")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(使用者="要設定的 Discord 使用者")
+async def admin_next_month_settings(interaction: discord.Interaction, 使用者: discord.User):
+    await send_admin_next_month_settings_panel(interaction, 使用者, source="admin_next_month_settings")
+
 @admin_group.command(name="帳號", description="查看所有綁定使用者的狀態")
 @app_commands.default_permissions(administrator=True)
 async def admin_query(interaction: discord.Interaction):
-    if interaction.user.id not in ADMIN_IDS:
-        embed = discord.Embed(title="❌ 權限不足", description="此指令僅限管理員使用", color=0xff0000)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+    if await reject_non_admin(interaction):
         return
     data = load_data()
     if not data:
@@ -3548,7 +3693,12 @@ async def admin_query(interaction: discord.Interaction):
 
     def done_or_wait(uid, kind, label, schedule_time, actual_time=None, actual_source=None):
         if actual_time:
-            source_label = "e-HR 判定" if actual_source == "ehr" else "e-HR 原始／補刷卡"
+            if actual_source == "ehr":
+                source_label = "e-HR 判定"
+            elif actual_source == "ehr_next_day":
+                source_label = "e-HR 判定（隔天）"
+            else:
+                source_label = "e-HR 原始／補刷卡"
             return f"✅ {label}：{actual_time}（{source_label}）"
         punched_at = punched_time(uid, kind)
         if punched_at is not None:
@@ -3641,9 +3791,7 @@ async def admin_query(interaction: discord.Interaction):
 @admin_group.command(name="今日打卡驗證", description="管理員查詢所有綁定使用者今日 e-HR 實際刷卡紀錄")
 @app_commands.default_permissions(administrator=True)
 async def admin_verify_today(interaction: discord.Interaction):
-    if interaction.user.id not in ADMIN_IDS:
-        embed = discord.Embed(title="❌ 權限不足", description="此指令僅限管理員使用", color=0xff0000)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+    if await reject_non_admin(interaction):
         return
 
     await interaction.response.defer(ephemeral=True, thinking=True)
@@ -3682,6 +3830,8 @@ async def admin_verify_today(interaction: discord.Interaction):
     def source_text(source):
         if source == "ehr":
             return "e-HR 判定"
+        if source == "ehr_next_day":
+            return "e-HR 判定（隔天）"
         if source == "times":
             return "e-HR 原始刷卡"
         return "e-HR"
@@ -3854,7 +4004,7 @@ notify_type_choices = [
     app_commands.Choice(name="早晨提醒（每天06:50提醒今日打卡排程）", value="morning"),
     app_commands.Choice(name="打卡前提醒（打卡前10分鐘提醒）", value="pre_punch"),
     app_commands.Choice(name="下班比對（平日18:00和值班隔天09:00比對）", value="compare"),
-    app_commands.Choice(name="月底摘要（每月最後一天22:00發送）", value="monthly"),
+    app_commands.Choice(name="月底摘要（每月最後一天19:00發送）", value="monthly"),
 ]
 
 @tree.command(name="通知設定", description="個別開關各種自動通知")
@@ -3939,7 +4089,7 @@ async def help_command(interaction: discord.Interaction):
         value="`/帳號綁定` — 綁定員工編號+密碼，開啟自動打卡\n　　　　　　綁定後自動評估當天打卡狀況：\n　　　　　　• 排程時間已過且 e-HR 無記錄 → 私訊補打按鈕\n　　　　　　• 超過 08:00 未打上班卡 → 私訊告知（不補打，避免遲到）\n　　　　　　• 排程時間未到 → 等待自動打卡，不另通知\n`/下月設定` — 設定下個月繼續自動打卡、值班與休假\n`/帳號解除` — 取消綁定，停止自動打卡",
         inline=False
     )
-    if is_admin_user(interaction.user.id):
+    if is_admin_interaction(interaction):
         embed.add_field(
             name="🛠️ 管理員指令",
             value=(
@@ -4007,7 +4157,7 @@ async def help_command(interaction: discord.Interaction):
             "　e-HR 有記錄（index6 或 times）→ 不通知（打卡成功）\n"
             "　e-HR 無記錄但 Bot 已打卡 → 通知「e-HR 尚未記錄」+ 補打按鈕\n"
             "　完全無記錄 → 通知「未偵測到打卡」+ 補打按鈕\n\n"
-            "**④ 月底摘要**（每月最後一天 22:00）\n"
+            "**④ 月底摘要**（每月最後一天 19:00）\n"
             "　本月所有打卡記錄摘要，方便核對\n\n"
             "**⑤ 下月設定提醒**（月底前五天每天 08:00）\n"
             "　未完成下月設定者會收到私訊提醒；完成後不再提醒\n"
@@ -4030,7 +4180,7 @@ async def help_command(interaction: discord.Interaction):
         value=(
             "`/查今日狀態` — 查看今天的打卡模式、Bot 排程時間，以及與 e-HR 記錄的比對結果\n"
             "`/查詢本日e-hr刷卡記錄` — 直接查詢今天 e-HR 系統的刷卡記錄（未綁定者可輸入帳號密碼）\n"
-            "`/查詢本月bot打卡排程` — 查看整個月每天的打卡設定一覽\n"
+            "`/查詢bot排程` — 查看本月或下月每天的 Bot 打卡排程\n"
             "`/查詢本月e-hr刷出卡紀錄` — 查詢本月 e-HR 紀錄的上下班時間（未綁定者可輸入帳號密碼；月底也會自動私訊發送）\n"
             "`/查詢值班休假日程` — 查看本月、下月、後續月份值班休假與下月設定狀態\n"
             "`/說明` — 顯示此說明頁面"
@@ -4040,8 +4190,123 @@ async def help_command(interaction: discord.Interaction):
     embed.set_footer(text="所有指令只有自己看得到 · 每天打卡時間在範圍內隨機產生")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# ── 查詢本月自動打卡時間 ──
-@tree.command(name="查詢本月bot打卡排程", description="查看整個月的打卡設定一覽")
+# ── 查詢 Bot 自動打卡排程 ──
+def add_months(base_date, month_delta):
+    month_index = base_date.month - 1 + month_delta
+    year = base_date.year + month_index // 12
+    month = month_index % 12 + 1
+    return date(year, month, 1)
+
+def build_bot_schedule_embeds(user_data, uid, target_month_date):
+    today = date.today()
+    year = target_month_date.year
+    month = target_month_date.month
+    next_month = add_months(target_month_date, 1)
+    days_in_month = (next_month - target_month_date).days
+
+    weekday_names = ["一", "二", "三", "四", "五", "六", "日"]
+    lines = []
+    duty_days = user_data.get("duty_days", [])
+    leave_dates = user_data.get("leave_dates", [])
+    cancel_dates = user_data.get("cancel_dates", [])
+
+    today_times = scheduled_times.get(uid, {})
+    time_in = today_times.get("in", f"{PUNCH_IN_START[0]:02d}:{PUNCH_IN_START[1]:02d}~{PUNCH_IN_END[0]:02d}:{PUNCH_IN_END[1]:02d}")
+    time_out = today_times.get("out", f"{PUNCH_OUT_START[0]:02d}:{PUNCH_OUT_START[1]:02d}~{PUNCH_OUT_END[0]:02d}:{PUNCH_OUT_END[1]:02d}")
+    time_duty = today_times.get("dutyout", f"{DUTY_OUT_START[0]:02d}:{DUTY_OUT_START[1]:02d}~{DUTY_OUT_END[0]:02d}:{DUTY_OUT_END[1]:02d}")
+    default_in = f"{PUNCH_IN_START[0]:02d}:{PUNCH_IN_START[1]:02d}~{PUNCH_IN_END[0]:02d}:{PUNCH_IN_END[1]:02d}"
+    default_out = f"{PUNCH_OUT_START[0]:02d}:{PUNCH_OUT_START[1]:02d}~{PUNCH_OUT_END[0]:02d}:{PUNCH_OUT_END[1]:02d}"
+    default_duty = f"{DUTY_OUT_START[0]:02d}:{DUTY_OUT_START[1]:02d}~{DUTY_OUT_END[0]:02d}:{DUTY_OUT_END[1]:02d}"
+
+    for day in range(1, days_in_month + 1):
+        d = date(year, month, day)
+        date_str = d.strftime("%Y-%m-%d")
+        weekday = weekday_names[d.weekday()]
+        day_label = f"{month:02d}/{day:02d}（{weekday}）"
+        prefix = "▶" if d == today else "　"
+        is_past = d < today
+        is_today = d == today
+        has_duty_yesterday = (d - timedelta(days=1)).strftime("%Y-%m-%d") in duty_days
+
+        if date_str in leave_dates:
+            if has_duty_yesterday:
+                lines.append(f"{prefix}`{day_label}` 🏖️休假＋值班下班" + (" ✅" if is_past and not is_today else ""))
+                if not is_past or is_today:
+                    lines.append(f"　　　　　　⏰ 值班下班：{time_duty if is_today else default_duty}")
+            else:
+                lines.append(f"{prefix}`{day_label}` 🏖️ 休假（不打卡）")
+        elif date_str in cancel_dates:
+            lines.append(f"{prefix}`{day_label}` ⏸️ 取消自動打卡（手動）")
+        elif date_str in duty_days:
+            lines.append(f"{prefix}`{day_label}` 🌙 值班" + (" ✅" if is_past and not is_today else ""))
+            if not is_past or is_today:
+                lines.append(f"　　　　　　⏰ 上班：{time_in if is_today else default_in}")
+        elif d.weekday() >= 5:
+            if has_duty_yesterday:
+                lines.append(f"{prefix}`{day_label}` 📴週末＋值班下班" + (" ✅" if is_past and not is_today else ""))
+                if not is_past or is_today:
+                    lines.append(f"　　　　　　⏰ 值班下班：{time_duty if is_today else default_duty}")
+            else:
+                lines.append(f"{prefix}`{day_label}` 📴 週末")
+        else:
+            if has_duty_yesterday:
+                label = "🟢 平日（值班隔天）"
+                lines.append(f"{prefix}`{day_label}` {label}" + (" ✅" if is_past and not is_today else ""))
+                if not is_past or is_today:
+                    lines.append(f"　　　　　　⏰ 值班下班：{time_duty if is_today else default_duty}")
+            else:
+                if is_today:
+                    lines.append(f"{prefix}`{day_label}` 🟢 平日（今天）")
+                    lines.append(f"　　　　　　⏰ 上班：{time_in}　下班：{time_out}")
+                elif is_past:
+                    lines.append(f"{prefix}`{day_label}` 🟢 平日 ✅")
+                else:
+                    lines.append(f"{prefix}`{day_label}` 🟢 平日")
+                    lines.append(f"　　　　　　⏰ 上班：{default_in}　下班：{default_out}")
+
+    mid = len(lines) // 2
+    embed1 = discord.Embed(
+        title=f"📆 {year}年{month}月 Bot 打卡排程（上半月）",
+        description="\n".join(lines[:mid]) or "（無資料）",
+        color=0x5865F2,
+    )
+    embed2 = discord.Embed(
+        title=f"📆 {year}年{month}月 Bot 打卡排程（下半月）",
+        description="\n".join(lines[mid:]) or "（無資料）",
+        color=0x5865F2,
+    )
+    embed2.set_footer(text="🟢平日　🌙值班　🏖️休假　⏸️取消自動　📴週末　✅已過")
+    return [embed1, embed2]
+
+class BotScheduleMonthView(discord.ui.View):
+    def __init__(self, requester_id, selected_offset=0):
+        super().__init__(timeout=300)
+        self.requester_id = str(requester_id)
+        self.selected_offset = selected_offset
+        for item in self.children:
+            if item.custom_id == f"bot_schedule_month_{selected_offset}":
+                item.disabled = True
+
+    async def _show_month(self, interaction, month_offset):
+        if str(interaction.user.id) != self.requester_id:
+            await interaction.response.send_message("這不是你的查詢面板。", ephemeral=True)
+            return
+        user_data = get_user_data(interaction.user.id)
+        target_month = add_months(date.today().replace(day=1), month_offset)
+        await interaction.response.edit_message(
+            embeds=build_bot_schedule_embeds(user_data, self.requester_id, target_month),
+            view=BotScheduleMonthView(self.requester_id, month_offset),
+        )
+
+    @discord.ui.button(label="本月", style=discord.ButtonStyle.primary, custom_id="bot_schedule_month_0")
+    async def current_month(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._show_month(interaction, 0)
+
+    @discord.ui.button(label="下月", style=discord.ButtonStyle.primary, custom_id="bot_schedule_month_1")
+    async def next_month(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._show_month(interaction, 1)
+
+@tree.command(name="查詢bot排程", description="查看本月或下月的 Bot 打卡排程")
 async def monthly_status(interaction: discord.Interaction):
     user_data = get_user_data(interaction.user.id)
 
@@ -4054,129 +4319,67 @@ async def monthly_status(interaction: discord.Interaction):
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
 
-    today = date.today()
-    year = today.year
-    month = today.month
     uid = str(interaction.user.id)
-
-    # 計算本月天數
-    if month == 12:
-        next_month = date(year + 1, 1, 1)
-    else:
-        next_month = date(year, month + 1, 1)
-    days_in_month = (next_month - date(year, month, 1)).days
-
-    weekday_names = ["一", "二", "三", "四", "五", "六", "日"]
-    lines = []
-
-    duty_days = user_data.get("duty_days", [])
-    leave_dates = user_data.get("leave_dates", [])
-    cancel_dates = user_data.get("cancel_dates", [])
-
-    # 取得今天的隨機打卡時間（如果已產生）
-    today_times = scheduled_times.get(uid, {})
-    time_in    = today_times.get("in",      f"{PUNCH_IN_START[0]:02d}:{PUNCH_IN_START[1]:02d}~{PUNCH_IN_END[0]:02d}:{PUNCH_IN_END[1]:02d}")
-    time_out   = today_times.get("out",     f"{PUNCH_OUT_START[0]:02d}:{PUNCH_OUT_START[1]:02d}~{PUNCH_OUT_END[0]:02d}:{PUNCH_OUT_END[1]:02d}")
-    time_duty  = today_times.get("dutyout", f"{DUTY_OUT_START[0]:02d}:{DUTY_OUT_START[1]:02d}~{DUTY_OUT_END[0]:02d}:{DUTY_OUT_END[1]:02d}")
-
-    for day in range(1, days_in_month + 1):
-        d = date(year, month, day)
-        date_str = d.strftime("%Y-%m-%d")
-        weekday = weekday_names[d.weekday()]
-        day_label = f"{month:02d}/{day:02d}（{weekday}）"
-        prefix = "▶" if d == today else "　"
-        is_past = d < today
-        is_today = d == today
-
-        # 昨天是否值班（影響今天是否打值班下班卡）
-        prev_date = d - timedelta(days=1)
-        prev_date_str = prev_date.strftime("%Y-%m-%d")
-        has_duty_yesterday = prev_date_str in duty_days
-
-        if date_str in leave_dates:
-            # 休假日：顯示請假，但如果昨天值班還是要打下班卡
-            if has_duty_yesterday:
-                if is_today:
-                    lines.append(f"{prefix}`{day_label}` 🏖️休假＋值班下班")
-                    lines.append(f"　　　　　　⏰ 值班下班：{time_duty}")
-                elif is_past:
-                    lines.append(f"{prefix}`{day_label}` 🏖️休假＋值班下班 ✅")
-                else:
-                    lines.append(f"{prefix}`{day_label}` 🏖️休假＋值班下班")
-                    lines.append(f"　　　　　　⏰ 值班下班：{DUTY_OUT_START[0]:02d}:{DUTY_OUT_START[1]:02d}~{DUTY_OUT_END[0]:02d}:{DUTY_OUT_END[1]:02d}")
-            else:
-                lines.append(f"{prefix}`{day_label}` 🏖️ 休假（不打卡）")
-
-        elif date_str in cancel_dates:
-            lines.append(f"{prefix}`{day_label}` ⏸️ 取消自動打卡（手動）")
-
-        elif date_str in duty_days:
-            # 值班日
-            if is_today:
-                lines.append(f"{prefix}`{day_label}` 🌙 值班")
-                lines.append(f"　　　　　　⏰ 上班：{time_in}")
-            elif is_past:
-                lines.append(f"{prefix}`{day_label}` 🌙 值班 ✅")
-            else:
-                lines.append(f"{prefix}`{day_label}` 🌙 值班")
-                lines.append(f"　　　　　　⏰ 上班：{PUNCH_IN_START[0]:02d}:{PUNCH_IN_START[1]:02d}~{PUNCH_IN_END[0]:02d}:{PUNCH_IN_END[1]:02d}")
-
-        elif d.weekday() >= 5:
-            # 週末
-            if has_duty_yesterday:
-                if is_today:
-                    lines.append(f"{prefix}`{day_label}` 📴週末＋值班下班")
-                    lines.append(f"　　　　　　⏰ 值班下班：{time_duty}")
-                elif is_past:
-                    lines.append(f"{prefix}`{day_label}` 📴週末＋值班下班 ✅")
-                else:
-                    lines.append(f"{prefix}`{day_label}` 📴週末＋值班下班")
-                    lines.append(f"　　　　　　⏰ 值班下班：{DUTY_OUT_START[0]:02d}:{DUTY_OUT_START[1]:02d}~{DUTY_OUT_END[0]:02d}:{DUTY_OUT_END[1]:02d}")
-            else:
-                lines.append(f"{prefix}`{day_label}` 📴 週末")
-
-        else:
-            # 平日
-            if has_duty_yesterday:
-                # 值班隔天平日
-                if is_today:
-                    lines.append(f"{prefix}`{day_label}` 🟢 平日（值班隔天）")
-                    lines.append(f"　　　　　　⏰ 值班下班：{time_duty}")
-                elif is_past:
-                    lines.append(f"{prefix}`{day_label}` 🟢 平日（值班隔天）✅")
-                else:
-                    lines.append(f"{prefix}`{day_label}` 🟢 平日（值班隔天）")
-                    lines.append(f"　　　　　　⏰ 值班下班：{DUTY_OUT_START[0]:02d}:{DUTY_OUT_START[1]:02d}~{DUTY_OUT_END[0]:02d}:{DUTY_OUT_END[1]:02d}")
-            else:
-                # 一般平日
-                if is_today:
-                    lines.append(f"{prefix}`{day_label}` 🟢 平日（今天）")
-                    lines.append(f"　　　　　　⏰ 上班：{time_in}　下班：{time_out}")
-                elif is_past:
-                    lines.append(f"{prefix}`{day_label}` 🟢 平日 ✅")
-                else:
-                    lines.append(f"{prefix}`{day_label}` 🟢 平日")
-                    lines.append(f"　　　　　　⏰ 上班：{PUNCH_IN_START[0]:02d}:{PUNCH_IN_START[1]:02d}~{PUNCH_IN_END[0]:02d}:{PUNCH_IN_END[1]:02d}　下班：{PUNCH_OUT_START[0]:02d}:{PUNCH_OUT_START[1]:02d}~{PUNCH_OUT_END[0]:02d}:{PUNCH_OUT_END[1]:02d}")
-
-    # 分兩個 embed 顯示（避免超過字數限制）
-    mid = len(lines) // 2
-    first_half = "\n".join(lines[:mid])
-    second_half = "\n".join(lines[mid:])
-
-    embed1 = discord.Embed(
-        title=f"📆 {year}年{month}月 打卡狀態（上半月）",
-        description=first_half,
-        color=0x5865F2
+    target_month = date.today().replace(day=1)
+    await interaction.response.send_message(
+        embeds=build_bot_schedule_embeds(user_data, uid, target_month),
+        view=BotScheduleMonthView(uid, 0),
+        ephemeral=True,
     )
-    embed2 = discord.Embed(
-        title=f"📆 {year}年{month}月 打卡狀態（下半月）",
-        description=second_half,
-        color=0x5865F2
-    )
-    legend = "🟢平日　🌙值班　🏖️休假　⏸️取消自動　📴週末　✅已過"
-    embed2.set_footer(text=legend)
 
-    await interaction.response.send_message(embeds=[embed1, embed2], ephemeral=True)
+class AdminBotScheduleMonthView(discord.ui.View):
+    def __init__(self, actor_id, target_uid, target_label, selected_offset=0):
+        super().__init__(timeout=300)
+        self.actor_id = str(actor_id)
+        self.target_uid = str(target_uid)
+        self.target_label = target_label
+        self.selected_offset = selected_offset
+        for item in self.children:
+            if item.custom_id == f"admin_bot_schedule_month_{selected_offset}":
+                item.disabled = True
+
+    async def _show_month(self, interaction, month_offset):
+        if str(interaction.user.id) != self.actor_id:
+            await interaction.response.send_message("這不是你的管理查詢面板。", ephemeral=True)
+            return
+        user_data = get_user_data(self.target_uid)
+        target_month = add_months(date.today().replace(day=1), month_offset)
+        await interaction.response.edit_message(
+            content=f"對象：{self.target_label}",
+            embeds=build_bot_schedule_embeds(user_data, self.target_uid, target_month),
+            view=AdminBotScheduleMonthView(self.actor_id, self.target_uid, self.target_label, month_offset),
+        )
+
+    @discord.ui.button(label="本月", style=discord.ButtonStyle.primary, custom_id="admin_bot_schedule_month_0")
+    async def current_month(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._show_month(interaction, 0)
+
+    @discord.ui.button(label="下月", style=discord.ButtonStyle.primary, custom_id="admin_bot_schedule_month_1")
+    async def next_month(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._show_month(interaction, 1)
+
+@admin_group.command(name="bot排程查詢", description="管理員查詢指定使用者本月或下月 Bot 打卡排程")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(使用者="要查詢 Bot 排程的 Discord 使用者")
+async def admin_bot_schedule_query(interaction: discord.Interaction, 使用者: discord.User):
+    if await reject_non_admin(interaction):
+        return
+    user_data = get_user_data(使用者.id)
+    if not user_data.get("empid"):
+        embed = discord.Embed(
+            title="❌ 尚未綁定帳號",
+            description=f"對象：{使用者.mention}\n此使用者尚未綁定 e-HR 帳號。",
+            color=0xff0000,
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    target_month = date.today().replace(day=1)
+    await interaction.response.send_message(
+        content=f"對象：{使用者.mention}",
+        embeds=build_bot_schedule_embeds(user_data, str(使用者.id), target_month),
+        view=AdminBotScheduleMonthView(interaction.user.id, 使用者.id, 使用者.mention, 0),
+        ephemeral=True,
+    )
 
 _auto_punch_started = False  # 確保 auto_punch_task 只啟動一次
 _commands_synced = False
