@@ -875,6 +875,21 @@ def is_weekend(check_date):
 def is_duty_after_day(user_data, check_date):
     return is_duty_day(user_data, check_date - timedelta(days=1))
 
+def today_mode_label(user_data, check_date):
+    if is_duty_after_day(user_data, check_date):
+        if is_leave_day(user_data, check_date):
+            return "🏖️ 今日為休假（值班隔天）"
+        if is_weekend(check_date):
+            return "📴 今日為週末（值班隔天）"
+        return "🌅 今日為值班隔天"
+    if is_weekend(check_date) and is_duty_day(user_data, check_date):
+        return "🌙 今日為週末值班日"
+    if is_duty_day(user_data, check_date):
+        return "🌙 今日為值班日"
+    if is_weekend(check_date):
+        return "📴 今日為週末"
+    return "🟢 今日為平日"
+
 def expects_regular_out_check(user_data, check_date):
     return (
         user_data.get("auto_punch", True)
@@ -911,7 +926,7 @@ def get_today_schedule(user_data):
         h_duty, m_duty = DUTY_OUT_START[0], DUTY_OUT_START[1]
         h_duty_e, m_duty_e = DUTY_OUT_END[0], DUTY_OUT_END[1]
         return "\n".join([
-            "🌙 今日為值班隔天",
+            "🌅 今日為值班隔天",
             "不打上班卡",
             f"⏰ {h_duty:02d}:{m_duty:02d}~{h_duty_e:02d}:{m_duty_e:02d} 自動打值班下班卡（昨日值班）",
         ])
@@ -1624,7 +1639,7 @@ async def auto_punch_task(client):
                 if is_weekend(today) and not is_duty_day(ud_dm, today) and not is_duty_day(ud_dm, yesterday_dm):
                     schedule_msg = "📴 今日為週末，不自動打卡"
                 elif is_duty_day(ud_dm, yesterday_dm):
-                    schedule_msg = f"🌙 今日為值班隔天\n⏰ 值班下班卡：**{duty_t}**\n（不打上班卡）"
+                    schedule_msg = f"🌅 今日為值班隔天\n⏰ 值班下班卡：**{duty_t}**\n（不打上班卡）"
                 elif is_duty_day(ud_dm, today):
                     schedule_msg = f"🌙 今日值班\n⏰ 上班卡：**{in_t}**\n⏰ 值班下班（明天）：**{duty_t}**"
                 else:
@@ -3057,21 +3072,7 @@ async def today_status(interaction: discord.Interaction):
     scheduled_duty = user_schedule.get("dutyout", "")
 
     # 今天是哪種模式
-    if is_duty_after:
-        if is_leave_day(user_data, today):
-            lines.append("🏖️ 今日為休假（值班隔天）")
-        elif is_weekend(today):
-            lines.append("📴 今日為週末（值班隔天）")
-        else:
-            lines.append("🌅 今日為值班隔天")
-    elif is_weekend(today) and is_duty_day(user_data, today):
-        lines.append("🌙 今日為週末值班日")
-    elif is_duty_day(user_data, today):
-        lines.append("🌙 今日為值班日")
-    elif is_weekend(today):
-        lines.append("📴 今日為週末")
-    else:
-        lines.append("🟢 今日為平日")
+    lines.append(today_mode_label(user_data, today))
     lines.append("")
 
     # ── 上班欄 ──
@@ -3750,7 +3751,7 @@ async def admin_query(interaction: discord.Interaction):
             mode = "⏸️ 今日已取消自動打卡"
             today_lines.append("　今日打卡：手動模式")
         elif is_duty_after:
-            mode = "🌙 昨日值班後"
+            mode = today_mode_label(ud, today)
             if not ud.get("auto_punch", True) and auto_disabled_by_monthly(ud, today):
                 today_lines.append("　本月續用未確認：只保留值班下班卡，不打一般上下班卡")
             today_lines.append("　上班：⏭️ 值班隔天不打上班卡")
@@ -3893,7 +3894,7 @@ async def admin_verify_today(interaction: discord.Interaction):
         elif is_cancelled_today:
             mode = "⏸️ 今日已取消自動打卡"
         elif is_duty_after:
-            mode = "🌙 昨日值班後"
+            mode = today_mode_label(ud, today)
         elif is_leave_today:
             mode = "🏖️ 今日休假"
         elif is_weekend_today and not is_duty_today:
