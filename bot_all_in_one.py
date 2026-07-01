@@ -567,8 +567,8 @@ def is_in_last_days_of_month(check_date, day_count):
     last_day = calendar.monthrange(check_date.year, check_date.month)[1]
     return check_date.day >= last_day - day_count + 1
 
-def enable_auto_punch(user_data, check_date=None):
-    """Enable auto punch and clear the one-day cancellation for check_date."""
+def enable_auto_punch(user_data, check_date=None, source="manual_resume"):
+    """Enable auto punch, clear one-day cancellation, and confirm this month."""
     check_date = check_date or date.today()
     today_str = check_date.strftime("%Y-%m-%d")
     cancel_dates = user_data.setdefault("cancel_dates", [])
@@ -577,6 +577,7 @@ def enable_auto_punch(user_data, check_date=None):
         cancel_dates.remove(today_str)
     user_data["auto_punch"] = True
     clear_monthly_disable_reason(user_data)
+    mark_monthly_auto_confirmed(user_data, month_key(check_date), source)
     return was_cancelled
 
 def mark_rebind_confirm_only(user_data):
@@ -2832,7 +2833,7 @@ class BindModal(discord.ui.Modal, title='綁定打卡帳號'):
             user_data = get_user_data(interaction.user.id)
             user_data["empid"] = empid
             user_data["password"] = password
-            enable_auto_punch(user_data)
+            enable_auto_punch(user_data, source="bind")
             mark_rebind_confirm_only(user_data)
             save_user_data(interaction.user.id, user_data)
             embed = discord.Embed(
@@ -2975,7 +2976,7 @@ async def resume_auto(interaction: discord.Interaction):
     today_str = date.today().strftime("%Y-%m-%d")
     if today_str in user_data.get("cancel_dates", []):
         user_data["cancel_dates"].remove(today_str)
-    enable_auto_punch(user_data)
+    enable_auto_punch(user_data, source="manual_resume")
     save_user_data(interaction.user.id, user_data)
     embed = discord.Embed(
         title="▶️ 自動打卡已恢復",
@@ -3514,7 +3515,7 @@ class AdminBindModal(discord.ui.Modal, title='管理員代綁定帳號'):
             user_data = get_user_data(self.target_user.id)
             user_data["empid"] = empid
             user_data["password"] = password
-            enable_auto_punch(user_data)
+            enable_auto_punch(user_data, source="admin_bind")
             mark_rebind_confirm_only(user_data)
             save_user_data(self.target_user.id, user_data)
 
@@ -3582,9 +3583,12 @@ async def admin_resume_auto(interaction: discord.Interaction, 使用者: discord
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
-    cancelled_today = enable_auto_punch(user_data)
+    monthly_disabled = str(user_data.get("auto_punch_disabled_reason", "")).startswith("monthly_not_confirmed:")
+    cancelled_today = enable_auto_punch(user_data, source="admin_resume")
     save_user_data(使用者.id, user_data)
     detail = "已移除今日取消設定，今天恢復自動打卡。" if cancelled_today else "今天的自動打卡已是開啟狀態。"
+    if monthly_disabled:
+        detail += f"\n已補上 {month_key(date.today())} 本月續用確認，月初檢查不會再自動關閉。"
     embed = discord.Embed(
         title="▶️ 已恢復自動打卡",
         description=f"對象：{使用者.mention}\n{detail}",
