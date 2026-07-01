@@ -979,6 +979,7 @@ scheduled_times = {}
 
 PUNCHED_FILE = "punched_today.json"
 SCHEDULE_FILE = "schedule_today.json"
+PRE_PUNCH_REMINDERS_FILE = "pre_punch_reminders_today.json"
 ADMIN_ALERTS_FILE = "admin_alerts_today.json"
 PENDING_OUT_RECHECKS_FILE = "pending_out_rechecks.json"
 MONTHLY_BINDING_ADMIN_SUMMARY_FILE = "monthly_binding_admin_summary.json"
@@ -1033,6 +1034,33 @@ def save_schedule_today(schedules, today_str):
             json.dump({"date": today_str, "schedules": schedules}, f)
     except:
         pass
+
+def load_pre_punch_reminders_today():
+    try:
+        if os.path.exists(PRE_PUNCH_REMINDERS_FILE):
+            with open(PRE_PUNCH_REMINDERS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            today_str = date.today().strftime("%Y-%m-%d")
+            if data.get("date") == today_str:
+                sent = data.get("sent", [])
+                return set(sent) if isinstance(sent, list) else set()
+    except Exception:
+        pass
+    return set()
+
+def save_pre_punch_reminders_today(sent, today_str):
+    try:
+        with open(PRE_PUNCH_REMINDERS_FILE, "w", encoding="utf-8") as f:
+            json.dump({"date": today_str, "sent": sorted(sent)}, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"save pre-punch reminder state failed: {e}")
+
+def _pre_punch_reminder_due(current_minute, scheduled_time):
+    scheduled_minute = _t2m(scheduled_time)
+    if scheduled_minute < 0:
+        return False
+    reminder_minute = scheduled_minute - 10
+    return 0 <= reminder_minute <= current_minute < scheduled_minute
 
 def load_admin_alerts_today():
     """載入今日已發送的管理員告警 key，避免重複洗版。"""
@@ -1302,6 +1330,7 @@ async def auto_punch_task(client):
     global scheduled_times
     # 從檔案載入今天已打卡記錄（重啟後不會重複打卡），格式：{key: "HH:MM"}
     punched_today = load_punched_today()
+    pre_punch_reminders = load_pre_punch_reminders_today()
     # 從檔案載入今天的隨機時間（重啟後保持同一組時間）
     saved_schedules = load_schedule_today()
     if saved_schedules:
@@ -1326,6 +1355,8 @@ async def auto_punch_task(client):
         if last_date != today_str:
             punched_today.clear()  # dict.clear() works fine
             save_punched_today(punched_today, today_str)
+            pre_punch_reminders.clear()
+            save_pre_punch_reminders_today(pre_punch_reminders, today_str)
             scheduled_times = {}
             save_schedule_today({}, today_str)
             save_pending_out_rechecks({}, today_str)
@@ -1750,48 +1781,45 @@ async def auto_punch_task(client):
             out_t_pre = times_pre.get("out", "")
             duty_t_pre = times_pre.get("dutyout", "")
 
-            # 計算10分鐘前的時間
-            def minus_10(t):
-                if not t:
-                    return ""
-                try:
-                    h, m = int(t[:2]), int(t[3:])
-                    total = h * 60 + m - 10
-                    if total < 0:
-                        return ""
-                    return f"{total // 60:02d}:{total % 60:02d}"
-                except:
-                    return ""
-
             remind_msgs = []
+            sent_pre_keys = []
             # 上班前10分鐘（值班隔天不提醒，休假不提醒，週末非值班不提醒）
-            if current_time == minus_10(in_t_pre):
+            if _pre_punch_reminder_due(current_min, in_t_pre):
                 if (not is_leave_day(ud_pre, today)
                         and not is_duty_day(ud_pre, yesterday)
                         and not (is_weekend(today) and not is_duty_day(ud_pre, today))):
                     key_pre = f"{uid_pre}-in-{today_str}"
-                    if key_pre not in punched_today:
+                    sent_key_pre = f"{key_pre}-pre"
+                    if key_pre not in punched_today and sent_key_pre not in pre_punch_reminders:
                         remind_msgs.append(f"⏰ 提醒：即將在 **{in_t_pre}** 自動打**上班卡**")
+                        sent_pre_keys.append(sent_key_pre)
             # 下班前10分鐘（值班當天不提醒、值班隔天不提醒、平日非值班才提醒）
-            if current_time == minus_10(out_t_pre):
+            if _pre_punch_reminder_due(current_min, out_t_pre):
                 if (not is_duty_day(ud_pre, today)
                         and not is_duty_day(ud_pre, yesterday)
                         and not is_weekend(today)
                         and not is_leave_day(ud_pre, today)):
                     key_pre = f"{uid_pre}-out-{today_str}"
-                    if key_pre not in punched_today:
+                    sent_key_pre = f"{key_pre}-pre"
+                    if key_pre not in punched_today and sent_key_pre not in pre_punch_reminders:
                         remind_msgs.append(f"⏰ 提醒：即將在 **{out_t_pre}** 自動打**下班卡**")
+                        sent_pre_keys.append(sent_key_pre)
             # 值班下班前10分鐘（值班隔天才提醒）
-            if current_time == minus_10(duty_t_pre):
+            if _pre_punch_reminder_due(current_min, duty_t_pre):
                 if is_duty_day(ud_pre, yesterday):
                     key_pre = f"{uid_pre}-dutyout-{today_str}"
-                    if key_pre not in punched_today:
+                    sent_key_pre = f"{key_pre}-pre"
+                    if key_pre not in punched_today and sent_key_pre not in pre_punch_reminders:
                         remind_msgs.append(f"⏰ 提醒：即將在 **{duty_t_pre}** 自動打**值班下班卡**")
+                        sent_pre_keys.append(sent_key_pre)
 
             if remind_msgs:
                 try:
                     pre_user = client.get_user(int(uid_pre)) or await client.fetch_user(int(uid_pre))
                     await pre_user.send("\n".join(remind_msgs))
+                    pre_punch_reminders.update(sent_pre_keys)
+                    save_pre_punch_reminders_today(pre_punch_reminders, today_str)
+                    print(f"pre-punch reminder sent: uid={uid_pre} keys={','.join(sent_pre_keys)}")
                 except Exception as e:
                     print(f"打卡前提醒失敗 {uid_pre}：{e}")
 

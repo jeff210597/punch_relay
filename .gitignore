@@ -9,6 +9,7 @@ github_sync_service.log
 punch_data.json
 punched_today.json
 schedule_today.json
+pre_punch_reminders_today.json
 admin_alerts_today.json
 pending_out_rechecks.json
 pending_dutyout_rechecks.json
