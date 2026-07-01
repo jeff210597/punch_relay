@@ -980,11 +980,13 @@ scheduled_times = {}
 PUNCHED_FILE = "punched_today.json"
 SCHEDULE_FILE = "schedule_today.json"
 ADMIN_ALERTS_FILE = "admin_alerts_today.json"
+PENDING_OUT_RECHECKS_FILE = "pending_out_rechecks.json"
 MONTHLY_BINDING_ADMIN_SUMMARY_FILE = "monthly_binding_admin_summary.json"
 MONTHLY_SUMMARY_SENT_FILE = "monthly_summary_sent.json"
 RETRY_DELAY_MINUTES = 2
 MAX_RETRY_ATTEMPTS = 3
 PUNCH_IN_CUTOFF_MIN = 8 * 60
+EHR_OUT_RECHECK_DELAY_MINUTES = 30
 
 def load_punched_today():
     """從檔案載入今天已打卡記錄，回傳 dict {key: "HH:MM"}"""
@@ -1054,6 +1056,29 @@ def save_admin_alerts_today(alerts, today_str):
     except:
         pass
 
+def load_pending_out_rechecks():
+    try:
+        path = PENDING_OUT_RECHECKS_FILE
+        if not os.path.exists(path) and os.path.exists("pending_dutyout_rechecks.json"):
+            path = "pending_dutyout_rechecks.json"
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            today_str = date.today().strftime("%Y-%m-%d")
+            if data.get("date") == today_str:
+                pending = data.get("pending", {})
+                return dict(pending) if isinstance(pending, dict) else {}
+    except Exception:
+        pass
+    return {}
+
+def save_pending_out_rechecks(pending, today_str):
+    try:
+        with open(PENDING_OUT_RECHECKS_FILE, "w", encoding="utf-8") as f:
+            json.dump({"date": today_str, "pending": pending}, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"save pending out rechecks failed: {e}")
+
 def load_monthly_summary_sent_state():
     try:
         if os.path.exists(MONTHLY_SUMMARY_SENT_FILE):
@@ -1121,6 +1146,154 @@ async def send_admin_alert(client, uid, empid, label, alert_type, reason, status
         alerts.add(alert_key)
         save_admin_alerts_today(alerts, today_str)
 
+def _b9_raw_times_include(result, target_time):
+    if not result or not target_time:
+        return False
+    return target_time in set(result.get("raw_times") or [])
+
+def _result_has_confirmed_dutyout(result):
+    if not result or not result.get("success"):
+        return False
+    inferred = infer_punch_times(result, True, False)
+    return bool(inferred.get("inferred_out"))
+
+def _result_has_confirmed_regular_out(result):
+    if not result or not result.get("success"):
+        return False
+    inferred = infer_punch_times(result, False, False)
+    return bool(inferred.get("inferred_out"))
+
+def _result_has_confirmed_out(result, kind):
+    if kind == "dutyout":
+        return _result_has_confirmed_dutyout(result)
+    return _result_has_confirmed_regular_out(result)
+
+def _recheck_due_time(now_dt):
+    return (now_dt + timedelta(minutes=EHR_OUT_RECHECK_DELAY_MINUTES)).strftime("%H:%M")
+
+def _pending_out_recheck_key(uid, kind):
+    return f"{uid}-{kind}"
+
+def schedule_pending_out_recheck(pending, uid, kind, empid, punched_time, scheduled_time, now_dt, today_str):
+    key = _pending_out_recheck_key(uid, kind)
+    entry = pending.get(key)
+    if entry and entry.get("status") == "pending":
+        return False
+    pending[key] = {
+        "status": "pending",
+        "kind": kind,
+        "uid": uid,
+        "empid": empid,
+        "punched_time": punched_time,
+        "scheduled_time": scheduled_time or "",
+        "created_at": now_dt.strftime("%H:%M"),
+        "recheck_at": _recheck_due_time(now_dt),
+    }
+    save_pending_out_rechecks(pending, today_str)
+    return True
+
+async def send_out_missing_notification(client, uid, empid, password, today_str, scheduled_time, kind, punched_today_ref=None):
+    punched_today_ref = punched_today_ref if punched_today_ref is not None else load_punched_today()
+    retry_key = f"{uid}-{kind}-{today_str}"
+    punched_time = punched_today_ref.get(retry_key)
+    is_dutyout = kind == "dutyout"
+    label = "值班下班" if is_dutyout else "下班"
+    alert_type = "ehr_missing_0900" if is_dutyout else "ehr_missing_1800"
+    check_time = "09:00" if is_dutyout else "18:00"
+    if punched_time:
+        notify_msg = (
+            f"⚠️ **{label}打卡確認失敗（{check_time}）**\n"
+            f"🤖 Bot 已在 {punched_time} 送出{label}卡，但 e-HR 出卡欄位尚未回填。\n"
+            "請確認是否需要手動補打。"
+        )
+        alert_reason = f"Bot 已送出{label}卡，但 e-HR 出卡欄位尚未回填。"
+    else:
+        notify_msg = (
+            f"⚠️ **{label}打卡確認失敗（{check_time}）**\n"
+            f"找不到 Bot 今日{label}打卡紀錄，且 e-HR 出卡欄位尚未回填。\n"
+            "請確認是否需要手動補打。"
+        )
+        alert_reason = f"找不到 Bot 今日{label}打卡紀錄，且 e-HR 出卡欄位尚未回填。"
+
+    await send_admin_alert(
+        client=client,
+        uid=uid,
+        empid=empid,
+        label=label,
+        alert_type=alert_type,
+        reason=alert_reason,
+        status="需要人工確認或補打。",
+        scheduled_time=scheduled_time,
+    )
+    check_user = client.get_user(int(uid)) or await client.fetch_user(int(uid))
+    await check_user.send(notify_msg)
+    makeup_view = MakeupPunchView(
+        client_ref=client,
+        uid=uid,
+        empid=empid,
+        password=password,
+        action="out",
+        label=label,
+        punch_key=retry_key,
+        punched_today_ref=punched_today_ref,
+        today_str=today_str,
+        retry_key=retry_key,
+    )
+    await check_user.send(f"是否要補打{label}卡？", view=makeup_view)
+
+async def process_pending_out_rechecks(client, now_dt, today, today_str):
+    pending = load_pending_out_rechecks()
+    if not pending:
+        return
+    current_minute = now_dt.hour * 60 + now_dt.minute
+    data = load_data()
+    changed = False
+    for pending_key, entry in list(pending.items()):
+        if entry.get("status") != "pending":
+            continue
+        uid = entry.get("uid") or pending_key.split("-", 1)[0]
+        kind = entry.get("kind") or ("dutyout" if pending_key.endswith("-dutyout") or "-" not in pending_key else "out")
+        recheck_at = entry.get("recheck_at", "")
+        if not recheck_at or _t2m(recheck_at) > current_minute:
+            continue
+        ud = data.get(uid, {})
+        empid = ud.get("empid")
+        password = ud.get("password")
+        expected = expects_dutyout_check(ud, today) if kind == "dutyout" else expects_regular_out_check(ud, today)
+        if not empid or not password or not expected:
+            entry["status"] = "skipped"
+            changed = True
+            continue
+        try:
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, lambda ep=empid, pw=password: _query_today_from_monthly_b9(ep, pw))
+            if _result_has_confirmed_out(result, kind):
+                entry["status"] = "confirmed"
+                entry["confirmed_at"] = now_dt.strftime("%H:%M")
+                changed = True
+                print(f"pending {kind} recheck confirmed: uid={uid} empid={empid}")
+                continue
+            punched_today_ref = load_punched_today()
+            await send_out_missing_notification(
+                client,
+                uid,
+                empid,
+                password,
+                today_str,
+                entry.get("scheduled_time") or scheduled_times.get(uid, {}).get(kind),
+                kind,
+                punched_today_ref,
+            )
+            entry["status"] = "notified"
+            entry["notified_at"] = now_dt.strftime("%H:%M")
+            changed = True
+        except Exception as e:
+            entry["last_error"] = str(e)
+            changed = True
+            print(f"pending {kind} recheck failed: uid={uid} err={e}")
+    if changed:
+        save_pending_out_rechecks(pending, today_str)
+
 async def auto_punch_task(client):
     await client.wait_until_ready()
     print("✅ 自動打卡排程啟動")
@@ -1155,10 +1328,12 @@ async def auto_punch_task(client):
             save_punched_today(punched_today, today_str)
             scheduled_times = {}
             save_schedule_today({}, today_str)
+            save_pending_out_rechecks({}, today_str)
             last_date = today_str
             print(f"📅 新的一天：{today_str}，重設打卡排程")
 
         data = load_data()
+        await process_pending_out_rechecks(client, now, today, today_str)
 
         if today.day == 1:
             changed_monthly = False
@@ -1679,6 +1854,26 @@ async def auto_punch_task(client):
                         # ③④ 無刷卡記錄 → 發通知 + 補打按鈕
                         punched_c = load_punched_today()  # 只讀一次，下方直接傳入
                         rk_c = f"{uid_c}-out-{today_str}"
+                        if rk_c in punched_c and _b9_raw_times_include(result_c, punched_c.get(rk_c)):
+                            pending_rechecks = load_pending_out_rechecks()
+                            scheduled_recheck = schedule_pending_out_recheck(
+                                pending_rechecks,
+                                uid_c,
+                                "out",
+                                empid_c,
+                                punched_c.get(rk_c),
+                                scheduled_times.get(uid_c, {}).get("out"),
+                                now,
+                                today_str,
+                            )
+                            if scheduled_recheck:
+                                print(
+                                    "pending out e-HR recheck: "
+                                    f"uid={uid_c} empid={empid_c} "
+                                    f"punched={punched_c.get(rk_c)} "
+                                    f"recheck_at={pending_rechecks.get(_pending_out_recheck_key(uid_c, 'out'), {}).get('recheck_at')}"
+                                )
+                            continue
                         if rk_c in punched_c:
                             pt = punched_c[rk_c]
                             notify_msg = f"📋 **今日下班打卡確認（18:00）**\n⚠️ Bot 已在 {pt} 打卡，但 e-HR 尚未記錄到刷卡\n請確認是否需要補打"
@@ -1740,6 +1935,26 @@ async def auto_punch_task(client):
                         # ③④ 無刷卡記錄 → 發通知 + 補打按鈕
                         punched_c2 = load_punched_today()  # 只讀一次
                         rk_c2 = f"{uid_c2}-dutyout-{today_str}"
+                        if rk_c2 in punched_c2 and _b9_raw_times_include(result_c2, punched_c2.get(rk_c2)):
+                            pending_rechecks = load_pending_out_rechecks()
+                            scheduled_recheck = schedule_pending_out_recheck(
+                                pending_rechecks,
+                                uid_c2,
+                                "dutyout",
+                                empid_c2,
+                                punched_c2.get(rk_c2),
+                                scheduled_times.get(uid_c2, {}).get("dutyout"),
+                                now,
+                                today_str,
+                            )
+                            if scheduled_recheck:
+                                print(
+                                    "pending dutyout e-HR recheck: "
+                                    f"uid={uid_c2} empid={empid_c2} "
+                                    f"punched={punched_c2.get(rk_c2)} "
+                                    f"recheck_at={pending_rechecks.get(_pending_out_recheck_key(uid_c2, 'dutyout'), {}).get('recheck_at')}"
+                                )
+                            continue
                         if rk_c2 in punched_c2:
                             pt2 = punched_c2[rk_c2]
                             notify_msg2 = f"📋 **今日值班下班打卡確認（09:00）**\n⚠️ Bot 已在 {pt2} 打卡，但 e-HR 尚未記錄到刷卡\n請確認是否需要補打"
