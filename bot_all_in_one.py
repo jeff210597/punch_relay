@@ -1882,7 +1882,7 @@ async def auto_punch_task(client):
                         # ③④ 無刷卡記錄 → 發通知 + 補打按鈕
                         punched_c = load_punched_today()  # 只讀一次，下方直接傳入
                         rk_c = f"{uid_c}-out-{today_str}"
-                        if rk_c in punched_c and _b9_raw_times_include(result_c, punched_c.get(rk_c)):
+                        if rk_c in punched_c:
                             pending_rechecks = load_pending_out_rechecks()
                             scheduled_recheck = schedule_pending_out_recheck(
                                 pending_rechecks,
@@ -1963,7 +1963,7 @@ async def auto_punch_task(client):
                         # ③④ 無刷卡記錄 → 發通知 + 補打按鈕
                         punched_c2 = load_punched_today()  # 只讀一次
                         rk_c2 = f"{uid_c2}-dutyout-{today_str}"
-                        if rk_c2 in punched_c2 and _b9_raw_times_include(result_c2, punched_c2.get(rk_c2)):
+                        if rk_c2 in punched_c2:
                             pending_rechecks = load_pending_out_rechecks()
                             scheduled_recheck = schedule_pending_out_recheck(
                                 pending_rechecks,
